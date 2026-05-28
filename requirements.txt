@@ -1,0 +1,11 @@
+streamlit
+langchain
+langchain-community
+langchain-xai
+langchain-huggingface
+chromadb
+pypdf
+python-dotenv
+fpdf
+pandas
+openpyxl
