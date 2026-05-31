@@ -44,15 +44,26 @@ Railway is currently the easiest platform for this project.
    - `ENVIRONMENT=production`
    - `TAVILY_API_KEY` (optional)
 
-6. Deploy.
+6. After setting the variables, click **"Deploy"** (or the Redeploy button) at the top.
 
-Railway will automatically expose port 8000 and give you a public URL.
+Railway will automatically provide the `PORT` environment variable. Our Dockerfile is configured to respect it (`${PORT:-8000}`).
+
+**Important:** Make sure you have the latest `Dockerfile` and `railway.toml` pushed to GitHub before deploying. The production stage must be the last stage in the Dockerfile.
+
+### After Setting Variables (Important)
+
+Once you have added the variables:
+
+1. Click the **Deploy** button (top right) to trigger a new build.
+2. Go to the **Deployments** tab and watch the build logs.
+3. When it says "Deployment is live", copy the public URL.
 
 ### Useful Railway Tips
 
-- Use **"Deploy"** button after changing environment variables.
+- Always click **Deploy** after changing environment variables.
 - You can add a custom domain later.
 - Railway has a generous free tier for small projects.
+- Check the "Logs" tab if the app doesn't start.
 
 ---
 

@@ -1,15 +1,9 @@
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
-target = "production"
+# Production stage is now the last stage in Dockerfile, so it is used by default.
 
 [deploy]
 startCommand = ""
-# Railway will use the CMD from the Dockerfile (production target)
-# We set target via build args if needed, but for now we can use the production image
-
-[env]
-# These are examples - set real values in Railway dashboard
-ENVIRONMENT = "production"
-# XAI_API_KEY = (set in Railway)
-# JWT_SECRET_KEY = (set in Railway)
+# Railway will use the CMD from the Dockerfile (we set target=production in [build])
+# The app will automatically listen on $PORT provided by Railway

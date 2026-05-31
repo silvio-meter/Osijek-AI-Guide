@@ -32,13 +32,19 @@ RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 # =============================================================================
-# Final production image
+# Development target (only used when explicitly building with --target development)
 # =============================================================================
-FROM base as production
+FROM dependencies as development
 
-# Copy installed packages from dependencies stage
-COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=dependencies /usr/local/bin /usr/local/bin
+RUN pip install watchdog  # optional for better reload
+
+# We mount the code in docker-compose for hot reload
+CMD uvicorn src.api:app --host 0.0.0.0 --port ${PORT:-8000} --reload
+
+# =============================================================================
+# Production stage (LAST stage = default for Railway, Fly.io, etc.)
+# =============================================================================
+FROM dependencies as production
 
 # Create non-root user for security
 RUN groupadd -r lega && useradd -r -g lega lega
@@ -57,19 +63,9 @@ USER lega
 # Expose the port
 EXPOSE 8000
 
-# Healthcheck using our dedicated endpoint (Python version for slim image)
+# Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-# Default command (production - no reload)
-CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
-
-# =============================================================================
-# Development target (with reload + volume mount in compose)
-# =============================================================================
-FROM dependencies as development
-
-RUN pip install watchdog  # optional for better reload
-
-# We mount the code in docker-compose for hot reload
-CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Production command - respects Railway's $PORT variable
+CMD uvicorn src.api:app --host 0.0.0.0 --port ${PORT:-8000}
