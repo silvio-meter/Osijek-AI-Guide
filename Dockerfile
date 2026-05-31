@@ -51,7 +51,6 @@ RUN groupadd -r lega && useradd -r -g lega lega
 
 # Copy application code
 COPY --chown=lega:lega src/ ./src/
-COPY --chown=lega:lega scripts/ ./scripts/
 COPY --chown=lega:lega data/ ./data/
 
 # Ensure data directory exists and is writable
