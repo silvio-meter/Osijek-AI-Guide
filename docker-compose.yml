@@ -1,0 +1,50 @@
+# =============================================================================
+# Osijek AI Guide - Lega API
+# Docker Compose
+#
+# IMPORTANT:
+# Docker is currently OPTIONAL for development.
+# You can also run the app locally with ./scripts/run.sh or manually.
+#
+# First time on macOS?
+#   Install Docker Desktop: https://www.docker.com/products/docker-desktop/
+# =============================================================================
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Use "production" when you want a lean image without reload
+      target: development
+    container_name: lega-api
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app/src
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-only-super-secret-key-change-me-in-production-please-1234567890}
+      - XAI_API_KEY=${XAI_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+    env_file:
+      - .env
+    volumes:
+      # Persist SQLite database + chat history, user profiles, feedback, etc.
+      - ./data:/app/data
+      # Hot reload for development (read-only is safer)
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+
+# When we migrate from SQLite to PostgreSQL, we can add a db service here.
+# For now we keep it simple with a single service + volume for data/.
+
+volumes:
+  lega-data:
+    driver: local

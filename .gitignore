@@ -39,5 +39,20 @@ Thumbs.db
 # Streamlit
 .streamlit/
 
-# Data (ako ne želiš uploadati velike datoteke)
-# data/
+# Environment & Secrets
+.env
+.env.local
+*.env
+
+# Data - persist locally, do not commit user data
+data/lega.db
+data/chat_history/
+data/user_profiles/
+data/tool_usage/
+data/feedback/
+data/*.json
+
+# Keep seed/example data
+!data/events_curated_seed.json
+!data/pois_example.json
+!data/events_example.json

@@ -1,134 +1,272 @@
 # 🏛️ Osijek AI Guide - Lega
 
-**Lega** is an advanced AI agent specialized in Osijek, Croatia. It answers in an authentic Osijek style — relaxed, honest, with a touch of local humor and deep knowledge of the city. It is not just another chatbot, but a real local guide that speaks in real Osijek slang (essekerizmi) when using Croatian, remembers the entire conversation, and uses a RAG system with a knowledge base of over 50 detailed PDFs.
+**Lega** je napredni AI vodič za Osijek koji pokreće produkcijski FastAPI backend dizajniran za mobilne aplikacije.
+
+Projekt je prošao kroz 6 tjedana intenzivnog razvoja (Faza 1) i sada nudi stabilan, siguran i dobro dokumentiran backend spreman za Flutter / React Native aplikaciju.
 
 ---
 
-## ✨ Key Features
+## Trenutno stanje (nakon Tjedna 6)
 
-- **Multilingual**: Croatian (with authentic Osijek slang), English, German
-- **Chat Memory**: Remembers the full conversation history
-- **RAG System**: Retrieves information from a curated knowledge base
-- **Source Citation**: Shows which PDF the answer came from
-- **Osijek Design**: Blue and white theme with the city coat of arms
-- **Interactive**: Asks follow-up questions and keeps the conversation going
+| Područje                    | Status          | Napomena |
+|----------------------------|------------------|----------|
+| Autentifikacija (JWT)      | ✅ Stabilno     | Refresh rotacija + blacklist |
+| Sigurnost & Rate Limiting  | ✅ Jako dobro   | Conditional limiting u testovima |
+| Points of Interest         | ✅ Zreo         | 40+ lokacija, proximity, filteri, sortiranje |
+| Events (hibridni model)    | ✅ Zreo         | Kurirani + scraperi + fallback |
+| Chat (Week 5)              | ✅ Napredan     | Puna memorija toolova, summary, feedback, personalizacija |
+| Dokumentacija              | ✅ Dobra        | OpenAPI + `docs/mobile-api.md` |
+| Deployment priprema        | 🚧 U tijeku     | Docker + README overhaul (Tjedan 6) |
 
----
-
-## 🛠️ How It Was Built
-
-This project was developed in one intensive day (approximately 10 hours of work) with the following phases:
-
-### Phase 1: Architecture & Setup
-Created a clean modular structure (`src/` folder) and separated concerns into `prompts.py`, `retrieval.py`, `config.py`, and `app.py`.
-
-### Phase 2: Core System
-Wrote a detailed System Prompt with authentic Osijek personality and examples. Implemented RAG using Chroma vector database + HuggingFace embeddings and connected to xAI Grok API.
-
-### Phase 3: Advanced Logic
-Added Chat Memory (full conversation history), implemented smart fallback logic, and added source citation for transparency.
-
-### Phase 4: User Experience & Design
-Added language selection (HR/EN/DE), integrated the official coat of arms of Osijek, designed a clean modern UI using Osijek's blue and white colors, and fixed multiple technical issues.
+**Glavni deliverable Faze 1:** Stabilan backend koji može pouzdano podržati pravu mobilnu aplikaciju.
 
 ---
 
-## 📁 Project Structure
+## ✨ Ključne značajke backend-a
+
+- **Hibridni sustav podataka** — Kurirani podaci imaju prioritet nad scraperima (restorani + događaji)
+- **Pametan chat s memorijom** — Puni kontekst razgovora uključujući tool calls
+- **Personalizacija** — Korisničke preferencije utječu na preporuke
+- **Javni API za mapu** — Events, Restaurants i Points of Interest s bogatim filtrima
+- **Streaming chat** — Server-Sent Events za glatko mobilno iskustvo
+- **Sigurnost** — JWT + refresh rotacija, rate limiting, security headers, standardizirane greške
+- **Admin alati** — Skripte za unos i održavanje kuriranih podataka
+
+---
+
+## 🚀 Quick Start
+
+### Opcija A: Docker (preporučeno za deployment)
+
+```bash
+cp .env.example .env   # ako već nemaš .env
+docker compose up --build
+```
+
+**Napomena za macOS korisnike:**  
+Ako ti `docker` nije pronađen, instaliraj **Docker Desktop**:
+→ https://www.docker.com/products/docker-desktop/
+
+Nakon instalacije pokreni Docker Desktop aplikaciju i pokušaj ponovo.
+
+### Opcija B: Lokalno pokretanje (bez Dockera)
+
+Najlakši način:
+
+```bash
+# 1. Kopiraj i uredi environment varijable
+cp .env.example .env
+# 2. Pokreni helper skriptu
+./scripts/run.sh
+```
+
+Ili ručno:
+
+```bash
+pip install -r requirements.txt
+PYTHONPATH=src uvicorn src.api:app --reload --port 8000
+```
+
+API je dostupan na: `http://localhost:8000`
+
+- **Swagger UI:** `http://localhost:8000/docs`
+- **ReDoc:** `http://localhost:8000/redoc`
+
+---
+
+## 📡 API Dokumentacija
+
+Za mobilne developere preporučujemo:
+
+- **[Mobilni API vodič (Flutter / React Native)](docs/mobile-api.md)** — Najvažniji dokument
+- **OpenAPI / Swagger:** `http://localhost:8000/docs`
+- **Pojedinačne teme:**
+  - [Autentifikacija](docs/auth.md)
+  - [Chat sustav](docs/chat.md)
+  - [Points of Interest](docs/points_of_interest.md)
+  - [Events (hibridni model)](docs/events.md)
+  - [Sigurnost](docs/security.md)
+
+---
+
+## 🗂️ Struktura projekta
+
+> **Napomena o bazi:** Trenutno koristimo SQLite (jednostavno za development). Za produkciju s većim opterećenjem preporučujemo prelazak na PostgreSQL (vidi [docs/deployment.md](docs/deployment.md)).
 
 ```
-Osijek-AI-Guide-v2/
+Osijek-AI-Guide/
 ├── src/
-│   ├── app.py                 # Main Streamlit application
-│   ├── prompts.py             # System prompts (HR, EN, DE)
-│   ├── retrieval.py           # RAG logic + citation
-│   ├── config.py              # Configuration
-│   └── grb_osijeka.jpg        # Coat of arms of Osijek
-├── data/                      # Knowledge base (50+ PDFs)
-├── vectorstore/               # Chroma vector database
-├── create_knowledge_base.py   # Script to rebuild the vector store
-├── requirements.txt
-├── .env                       # Contains XAI_API_KEY
+│   ├── api.py                 # Glavni FastAPI aplikacija
+│   ├── models/                # SQLAlchemy modeli (User, Event, POI...)
+│   ├── routers/               # Auth, Events, Points of Interest
+│   ├── schemas/               # Pydantic modeli
+│   ├── tools.py               # LangChain toolovi (hibridni eventi, restorani...)
+│   ├── scrapers.py            # Lokalni scraperi
+│   └── core/                  # Rate limiter, security, logging, exceptions
+├── scripts/                   # Admin & import skripte
+│   ├── import_pois.py
+│   ├── import_events.py
+│   ├── add_curated_event.py
+│   └── ...
+├── data/
+│   ├── lega.db                # SQLite baza
+│   ├── events_curated_seed.json
+│   └── pois_example.json
+├── docs/                      # Detaljna dokumentacija
+├── tests/
+├── STATUS_AFTER_5_WEEKS.md
+├── PHASE1_BACKEND_PLAN.md
 └── README.md
 ```
 
 ---
 
-## 🚀 Installation & Running
+## 🛠️ Upravljanje podacima (Admin skripte)
 
-### 1. Install dependencies
+Projekt koristi **hibridni pristup** — najbolji podaci su ručno kurirani.
 
-```bash
-pip3 install -r requirements.txt
-```
+### Unified Admin CLI (preporučeno)
 
-### 2. Set up your API key
-
-Create a `.env` file in the root folder and add:
-
-```env
-XAI_API_KEY=sk-proj-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-```
-
-### 3. Run the application
+Od Tjedna 6 imamo jedinstveni admin alat:
 
 ```bash
-python3 -m streamlit run src/app.py
+# Općeniti pregled
+PYTHONPATH=. python3 scripts/admin.py stats
+
+# Korisnici
+PYTHONPATH=. python3 scripts/admin.py users list
+PYTHONPATH=. python3 scripts/admin.py users show 5
+
+# Chat history
+PYTHONPATH=. python3 scripts/admin.py chat reset 5
+
+# Events i POI
+PYTHONPATH=. python3 scripts/admin.py events --curated
+PYTHONPATH=. python3 scripts/admin.py pois --limit 20
+
+# Feedback
+PYTHONPATH=. python3 scripts/admin.py feedback summary
 ```
 
----
+Za sve komande: `python3 scripts/admin.py --help`
 
-## 🔧 How to Customize
+### Events (stare skripte još rade)
+```bash
+# Bulk import / update
+PYTHONPATH=. python3 scripts/import_events.py data/events_curated_seed.json
 
-| File              | What you can change                     |
-|-------------------|-----------------------------------------|
-| `src/app.py`      | UI design, layout, logic                |
-| `src/prompts.py`  | Personality, examples, slang            |
-| `src/retrieval.py`| Retrieval parameters and citation       |
-| `src/config.py`   | Model, temperature, similarity threshold|
+# Interaktivno dodavanje jednog događaja
+PYTHONPATH=. python3 scripts/add_curated_event.py
+```
 
----
+### Points of Interest
+```bash
+PYTHONPATH=. python3 scripts/import_pois.py data/pois_example.json
+```
 
-## 📚 Knowledge Base
-
-The agent uses a carefully curated knowledge base of over 50 detailed PDFs covering:
-- History of Osijek (from Roman times to present)
-- Tourism, landmarks, and practical information
-- Gastronomy and traditional food
-- Accommodation, events, nature, and more
+Ove skripte koriste upsert logiku i označavaju podatke kao `is_curated`.
 
 ---
 
-## 🧠 Technical Stack
+## 🧪 Testiranje
 
-- **Frontend**: Streamlit
-- **LLM**: Grok-3-mini (via xAI API)
-- **Vector Database**: Chroma
-- **Embeddings**: sentence-transformers/all-MiniLM-L6-v2
-- **Framework**: LangChain
+```bash
+# Normalni testovi (rate limiting isključen)
+TESTING=1 PYTHONPATH=src python -m pytest tests/ -q
 
----
+# Samo auth testovi
+TESTING=1 PYTHONPATH=src python -m pytest tests/test_auth.py -v
+```
 
-## 🚀 Future Improvements (Planned)
-
-- [ ] Export conversation to text/PDF
-- [ ] Better fallback mechanism
-- [ ] More examples in the System Prompt
-- [ ] Streaming responses
-- [ ] Deployment to Streamlit Cloud or Hugging Face
-- [ ] Voice input support
+**Važno:** Normalni testovi nikad ne bi smjeli ići na `/auth/register` endpoint. Koristi `auth_headers` fixture koja kreira korisnike direktno u bazi.
 
 ---
 
-## 👤 Author
+## 🧠 Tehnički stack
 
-Developed by **Silvio Meter** in one focused day (May 28, 2026).
+- **Backend:** FastAPI + SQLAlchemy 2.0 + Pydantic v2
+- **Autentifikacija:** JWT (python-jose) + refresh token rotacija + blacklist
+- **Chat & Tools:** LangChain + Grok-3-mini (xAI)
+- **Baza:** SQLite (lako migrirati na PostgreSQL)
+- **Sigurnost:** slowapi (rate limiting), custom security middleware
+- **Testiranje:** pytest + dependency overrides
 
 ---
 
-## 📄 License
+## 🐳 Docker (Tjedan 6)
 
-This project is open for personal and educational use.
+Projekt je dockeriziran za jednostavno pokretanje i deployment.
+
+**Detaljan vodič:** pogledaj [docs/docker.md](docs/docker.md)
+
+### Brzi start s Dockerom
+
+```bash
+docker compose up --build
+```
+
+**Važno za macOS:** Ako ti `docker` nije pronađen, instaliraj Docker Desktop s:
+https://www.docker.com/products/docker-desktop/
+
+### Dostupni targeti
+
+- `development` → hot reload (default)
+- `production` → optimizirana slika
+
+Napomena: Docker CLI nije bio dostupan tijekom razvoja ovog dijela, stoga je Docker trenutno opcionalan.
+
+## 🚀 Deployment
+
+Projekt je spreman za deployment.
+
+**Glavni vodič:** [docs/deployment.md](docs/deployment.md)
+
+### Brzi pregled
+
+- Najlakša platforma za solo developere: **Railway**
+- Imamo `docker-compose.prod.yml` za produkciju
+- `/health` endpoint je dostupan za monitoring
+
+Za detaljne upute (Railway, Fly.io, VPS, prelazak na PostgreSQL) pogledaj dokumentaciju.
+
+## 📚 Dokumentacija
+
+Sva dokumentacija se nalazi u mapi `docs/`:
+
+- `mobile-api.md` — Glavni vodič za mobilnu integraciju
+- `auth.md`, `chat.md`, `events.md`, `points_of_interest.md`
+- `security.md`, `architecture.md`
+
+Također pogledaj:
+- `STATUS_AFTER_5_WEEKS.md` — Detaljan status nakon 5 tjedana + stalna rješenja
+- `PHASE1_BACKEND_PLAN.md` — Izvorni plan Faze 1
 
 ---
 
-**Enjoy talking to Lega!** 🏛️
+## 🗺️ Što slijedi (Tjedan 6 i dalje)
+
+Tjedan 6 fokus je na:
+- Dockerizacija
+- Deployment pipeline (Railway / Fly.io / VPS)
+- Unificirani admin CLI alati
+- Još bolja dokumentacija
+
+Nakon Faze 1 planiramo prelazak na **Fazu 2: Flutter mobilna aplikacija**.
+
+---
+
+## 👤 Autor
+
+Projekt razvija **Silvio Meter** solo, iterativno, tjedan po tjedan.
+
+---
+
+## 📄 Licenca
+
+Korištenje dopušteno u osobne i edukacijske svrhe.
+
+---
+
+**Lega je spremna za mobilnu aplikaciju.** 🏛️
+
+Za pitanja oko integracije ili doprinosa — javi se.
