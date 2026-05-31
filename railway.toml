@@ -4,4 +4,5 @@ dockerfilePath = "Dockerfile"
 # Production stage is now the last stage in Dockerfile, so it is used by default.
 
 [deploy]
-startCommand = "PYTHONPATH=/app/src uvicorn src.api:app --host 0.0.0.0 --port $PORT"
+# Railway will use the CMD + ENV defined in the Dockerfile
+# (ENV PYTHONPATH=/app/src + CMD uvicorn ... with $PORT support)
