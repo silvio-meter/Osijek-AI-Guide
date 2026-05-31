@@ -65,15 +65,7 @@ EXPOSE 8000
 
 # Healthcheck - more tolerant for Railway cold starts
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
-    CMD python -c "
-import urllib.request
-import time
-try:
-    urllib.request.urlopen('http://localhost:8000/health', timeout=5)
-except Exception as e:
-    print(f'Healthcheck failed: {e}')
-    exit(1)
-" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)" || exit 1
 
 # Production command - respects Railway's $PORT variable
 CMD uvicorn src.api:app --host 0.0.0.0 --port ${PORT:-8000}
