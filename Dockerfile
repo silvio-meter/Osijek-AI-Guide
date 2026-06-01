@@ -32,44 +32,43 @@ RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 # =============================================================================
-# Final production image
-# =============================================================================
-FROM base as production
-
-# Copy installed packages from dependencies stage
-COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=dependencies /usr/local/bin /usr/local/bin
-
-# Create non-root user for security
-RUN groupadd -r lega && useradd -r -g lega lega
-
-# Copy application code
-COPY --chown=lega:lega src/ ./src/
-COPY --chown=lega:lega scripts/ ./scripts/
-COPY --chown=lega:lega data/ ./data/
-
-# Ensure data directory exists and is writable
-RUN mkdir -p /app/data && chown -R lega:lega /app/data
-
-# Switch to non-root user
-USER lega
-
-# Expose the port
-EXPOSE 8000
-
-# Healthcheck using our dedicated endpoint (Python version for slim image)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
-
-# Default command (production - no reload)
-CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
-
-# =============================================================================
-# Development target (with reload + volume mount in compose)
+# Development target (only used when explicitly building with --target development)
 # =============================================================================
 FROM dependencies as development
 
 RUN pip install watchdog  # optional for better reload
 
 # We mount the code in docker-compose for hot reload
-CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD uvicorn src.api:app --host 0.0.0.0 --port ${PORT:-8000} --reload
+
+# =============================================================================
+# Production stage (LAST stage = default for Railway, Fly.io, etc.)
+# =============================================================================
+FROM dependencies as production
+
+# Create non-root user for security
+RUN groupadd -r lega && useradd -r -g lega lega
+
+# Copy application code
+COPY --chown=lega:lega src/ ./src/
+COPY --chown=lega:lega data/ ./data/
+
+# Ensure data subdirectories exist (will be owned by root for now)
+RUN mkdir -p /app/data/user_profiles \
+             /app/data/chat_history \
+             /app/data/tool_usage \
+             /app/data/feedback
+
+# NOTE: Running as root for now because of Railway volume permission issues.
+# We can switch back to non-root user later with a proper entrypoint.
+# USER lega
+
+# Expose the port
+EXPOSE 8000
+
+# Healthcheck - more tolerant for Railway cold starts
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)" || exit 1
+
+# Production command - respects Railway's $PORT variable
+CMD uvicorn src.api:app --host 0.0.0.0 --port ${PORT:-8000}
