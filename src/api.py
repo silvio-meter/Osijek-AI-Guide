@@ -236,6 +236,21 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     )
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Catch-all handler that logs the full traceback for any unhandled exception."""
+    logger = logging.getLogger("lega.api")
+    logger.exception("Unhandled exception occurred during request")
+    return JSONResponse(
+        status_code=500,
+        content=ErrorResponse(
+            error="internal_server_error",
+            message="An unexpected error occurred. The error has been logged.",
+            details=None,
+        ).model_dump(),
+    )
+
+
 # ======================
 # Security Middleware (Week 2 - Dan 4)
 # ======================
