@@ -44,6 +44,7 @@ import logging
 import sys
 import traceback
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 # Robust logging configuration for production (Railway / Docker / uvicorn)
 # We force handlers to stdout and use force=True so uvicorn doesn't swallow our logs.
@@ -308,6 +309,19 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     print("=" * 72 + "\n", file=sys.stderr)
     sys.stderr.flush()
 
+    # Method 4: Persist to file on the Volume (last resort for Railway log visibility issues)
+    try:
+        crash_file = "/app/data/last_crash.txt"
+        with open(crash_file, "w", encoding="utf-8") as f:
+            f.write(error_banner)
+            traceback.print_exc(file=f)
+            f.write("\n" + "=" * 72 + "\n")
+            f.write(f"Timestamp: {datetime.now(timezone.utc).isoformat()}\n")
+            f.write(f"Path: {request.method} {request.url.path}\n")
+        print(f"💾 Crash details also written to {crash_file}", flush=True)
+    except Exception as write_err:
+        print(f"Failed to write crash file: {write_err}", flush=True)
+
     return JSONResponse(
         status_code=500,
         content=ErrorResponse(
@@ -394,6 +408,18 @@ class PreferenceUpdate(BaseModel):
 @app.get("/")
 def root():
     return {"message": "Osijek AI Guide API is running. Ready for mobile app."}
+
+
+@app.get("/debug/last-crash")
+def get_last_crash():
+    """Temporary debug endpoint to retrieve the last unhandled exception details.
+    Useful when Railway logs are hard to access.
+    """
+    try:
+        with open("/app/data/last_crash.txt", encoding="utf-8") as f:
+            return {"content": f.read()}
+    except FileNotFoundError:
+        return {"error": "No crash file found yet. No unhandled exception has occurred since last restart."}
 
 
 @app.get("/health", tags=["Public Data"])
