@@ -62,3 +62,6 @@ data/*.json
 !data/events_curated_seed.json
 !data/pois_example.json
 !data/events_example.json
+
+# Generated vector database (can be rebuilt)
+vectorstore/
