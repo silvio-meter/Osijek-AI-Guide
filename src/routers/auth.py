@@ -135,47 +135,38 @@ def login(
     - Validates email + password
     - Returns short-lived access token + long-lived refresh token
     """
-    try:
-        email = login_data.email.lower().strip()
+    email = login_data.email.lower().strip()
 
-        user = db.query(User).filter(User.email == email).first()
-        if not user:
-            raise UnauthorizedException(message="Incorrect email or password")
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise UnauthorizedException(message="Incorrect email or password")
 
-        if not verify_password(login_data.password, user.hashed_password):
-            raise UnauthorizedException(message="Incorrect email or password")
+    if not verify_password(login_data.password, user.hashed_password):
+        raise UnauthorizedException(message="Incorrect email or password")
 
-        if not user.is_active:
-            raise ValidationException(
-                message="User account is inactive",
-                details={"email": email}
-            )
-
-        # Generate tokens
-        access_token = create_access_token(user_id=user.id, email=user.email)
-        refresh_token, jti = create_refresh_token(user_id=user.id)
-
-        # Save refresh token jti in DB (for revocation / rotation)
-        expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-        save_refresh_token(db, user_id=user.id, jti=jti, expires_at=expires_at)
-
-        logger = logging.getLogger("lega.auth")
-        logger.info(f"[AUTH] Successful login + refresh token issued | user_id={user.id} | jti={jti[:8]}...")
-
-        return TokenResponse(
-            access_token=access_token,
-            refresh_token=refresh_token,
-            token_type="bearer",
-            expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    if not user.is_active:
+        raise ValidationException(
+            message="User account is inactive",
+            details={"email": email}
         )
 
-    except Exception as e:
-        import traceback
-        logger = logging.getLogger("lega.auth")
-        logger.exception("=== LOGIN CRASH ===")
-        print("=== LOGIN CRASH TRACEBACK ===")
-        traceback.print_exc()
-        raise
+    # Generate tokens
+    access_token = create_access_token(user_id=user.id, email=user.email)
+    refresh_token, jti = create_refresh_token(user_id=user.id)
+
+    # Save refresh token jti in DB (for revocation / rotation)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    save_refresh_token(db, user_id=user.id, jti=jti, expires_at=expires_at)
+
+    logger = logging.getLogger("lega.auth")
+    logger.info(f"[AUTH] Successful login + refresh token issued | user_id={user.id} | jti={jti[:8]}...")
+
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
 
 
 # ==========================================
