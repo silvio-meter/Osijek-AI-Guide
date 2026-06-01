@@ -41,6 +41,9 @@ Run with: PYTHONPATH=src uvicorn src.api:app --reload --port 8000
 """
 
 import logging
+import sys
+import traceback
+from contextlib import asynccontextmanager
 
 # Basic logging configuration for Dan 5
 logging.basicConfig(
@@ -114,7 +117,31 @@ from core.logging_middleware import LoggingMiddleware
 # For full chat we would need the LLM + tool calling loop.
 # For MVP we expose the specialized tools directly + a simple chat stub.
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI lifespan context manager (startup + shutdown).
+    Critical: ensures DB tables exist on every boot, especially after
+    fresh Railway Volume mounts or new deploys (SQLite has no auto-migrate).
+    """
+    # === STARTUP ===
+    try:
+        from database import init_db
+        init_db()
+        print("✅ [startup] Database tables initialized/verified (SQLite + Railway Volume safe)")
+    except Exception as e:
+        # Non-fatal: tables may already exist or minor issue; requests will surface real errors
+        print(f"⚠️ [startup] Database init note: {e}")
+
+    yield  # app is now running
+
+    # === SHUTDOWN (optional cleanup) ===
+    print("🛑 [shutdown] App is shutting down.")
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Osijek AI Guide API (Lega)",
     version="0.6.0",
     description="""
@@ -238,9 +265,25 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    """Catch-all handler that logs the full traceback for any unhandled exception."""
+    """Catch-all handler that logs the full traceback for any unhandled exception.
+
+    We force-print the traceback to stderr because uvicorn's logging setup
+    in Docker/Railway often swallows or reconfigures Python loggers.
+    This guarantees the root cause is always visible in deployment logs.
+    """
     logger = logging.getLogger("lega.api")
     logger.exception("Unhandled exception occurred during request")
+
+    # === GUARANTEED VISIBILITY IN RAILWAY / DOCKER LOGS ===
+    # The logger.exception above may not appear depending on uvicorn config.
+    # Always dump the full stack trace to stderr so it is impossible to miss.
+    print("\n" + "=" * 72, file=sys.stderr)
+    print("🚨 UNHANDLED EXCEPTION - FULL PYTHON TRACEBACK (forced for Railway)", file=sys.stderr)
+    print(f"   Request: {request.method} {request.url.path}", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    print("=" * 72 + "\n", file=sys.stderr)
+
     return JSONResponse(
         status_code=500,
         content=ErrorResponse(

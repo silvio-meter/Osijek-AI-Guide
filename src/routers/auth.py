@@ -231,11 +231,11 @@ def refresh_token(
     summary="Logout - revokes the refresh token",
 )
 def logout(
-    request: LogoutRequest,
+    logout_request: LogoutRequest,
     db: Session = Depends(get_db)
 ):
     """Revokes the provided refresh token so it can no longer be used."""
-    payload = decode_token(refresh_request.refresh_token)
+    payload = decode_token(logout_request.refresh_token)
     if payload and payload.get("type") == "refresh":
         jti = payload.get("jti")
         if jti:
