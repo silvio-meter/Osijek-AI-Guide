@@ -8,6 +8,8 @@ Endpoints:
 - POST /auth/logout    → Revoke refresh token (logout)
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
