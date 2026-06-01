@@ -45,11 +45,14 @@ import sys
 import traceback
 from contextlib import asynccontextmanager
 
-# Basic logging configuration for Dan 5
+# Robust logging configuration for production (Railway / Docker / uvicorn)
+# We force handlers to stdout and use force=True so uvicorn doesn't swallow our logs.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
 )
 
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, Response
@@ -274,15 +277,27 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     logger = logging.getLogger("lega.api")
     logger.exception("Unhandled exception occurred during request")
 
-    # === GUARANTEED VISIBILITY IN RAILWAY / DOCKER LOGS ===
-    # The logger.exception above may not appear depending on uvicorn config.
-    # Always dump the full stack trace to stderr so it is impossible to miss.
-    print("\n" + "=" * 72, file=sys.stderr)
-    print("🚨 UNHANDLED EXCEPTION - FULL PYTHON TRACEBACK (forced for Railway)", file=sys.stderr)
-    print(f"   Request: {request.method} {request.url.path}", file=sys.stderr)
-    print("=" * 72, file=sys.stderr)
+    # === MAXIMUM VISIBILITY IN RAILWAY / DOCKER ===
+    # Multiple output methods because Railway + uvicorn can be flaky with logs.
+    error_banner = "\n" + "=" * 72 + "\n"
+    error_banner += "🚨 UNHANDLED EXCEPTION - FULL PYTHON TRACEBACK (forced output)\n"
+    error_banner += f"   Request: {request.method} {request.url.path}\n"
+    error_banner += "=" * 72 + "\n"
+
+    # Method 1: logging (may be captured by uvicorn)
+    logger.error(error_banner)
+
+    # Method 2: Direct stdout with flush (most reliable in containers)
+    sys.stdout.write(error_banner)
+    traceback.print_exc(file=sys.stdout)
+    sys.stdout.write("=" * 72 + "\n\n")
+    sys.stdout.flush()
+
+    # Method 3: Also to stderr as backup
+    print(error_banner, file=sys.stderr)
     traceback.print_exc(file=sys.stderr)
     print("=" * 72 + "\n", file=sys.stderr)
+    sys.stderr.flush()
 
     return JSONResponse(
         status_code=500,
@@ -421,6 +436,8 @@ async def chat_with_lega(
     Requires valid JWT authentication.
     Uses the authenticated user's ID for chat history and personalization.
     """
+    print(f"\n=== [CHAT] Request received | user_id={current_user.id} | message='{chat_request.message[:80]}...' ===", flush=True)
+
     # Prefer authenticated user ID, fall back to request body only for legacy/testing
     user_id = str(current_user.id)
     if chat_request.user_id and chat_request.user_id != "default_user":
