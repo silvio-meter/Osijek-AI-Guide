@@ -449,8 +449,8 @@ async def chat_with_lega(
     raw_history = chat_history_manager.load_history(user_id)
 
     # Apply client-requested history limit (for token / cost control)
-    if request.max_history and request.max_history > 0:
-        raw_history = raw_history[-request.max_history:]
+    if chat_request.max_history and chat_request.max_history > 0:
+        raw_history = raw_history[-chat_request.max_history:]
 
     # Rebuild LangChain messages (including tool calls and tool results)
     chat_history_messages = []
@@ -548,7 +548,7 @@ async def chat_with_lega(
 
         # Prepare final messages for the answer (whether we stream or not)
         final_messages = prompt.invoke({
-            "input": request.message,
+            "input": chat_request.message,
             "chat_history": []
         }).to_messages()
 
@@ -594,7 +594,7 @@ async def chat_with_lega(
     else:
         # No tools used
         final_messages = prompt.invoke({
-            "input": request.message,
+            "input": chat_request.message,
             "chat_history": []
         }).to_messages()
 
