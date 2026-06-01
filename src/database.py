@@ -45,13 +45,15 @@ def get_db():
 
 
 def init_db():
-    """Create all tables. Call this on startup or via CLI."""
+    """Create all tables. Call this on startup or via CLI.
+    This is idempotent and safe to call on every boot.
+    """
     # Import all models here so they are registered with Base.
-    # We import inside the function to avoid circular imports at module load time.
     from models.user import User  # noqa: F401
     from models.refresh_token import RefreshToken  # noqa: F401
     from models.point_of_interest import PointOfInterest  # noqa: F401
     from models.event import Event  # noqa: F401
 
+    print(f"🔧 [DB] Running create_all on {DB_PATH} ...", flush=True)
     Base.metadata.create_all(bind=engine)
-    print(f"✅ Database initialized at: {DB_PATH}")
+    print(f"✅ [DB] Tables ready at: {DB_PATH}", flush=True)

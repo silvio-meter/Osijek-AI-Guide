@@ -55,6 +55,14 @@ logging.basicConfig(
     force=True,
 )
 
+# Belt-and-suspenders: Ensure DB tables exist as early as possible (before lifespan).
+# This helps on Railway where lifespan behavior can sometimes be unreliable.
+try:
+    from database import init_db
+    init_db()
+except Exception as e:
+    print(f"⚠️ [early-init] Database init warning (will retry in lifespan): {e}", flush=True)
+
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -129,13 +137,14 @@ async def lifespan(app: FastAPI):
     fresh Railway Volume mounts or new deploys (SQLite has no auto-migrate).
     """
     # === STARTUP ===
+    print("🚀 [lifespan] Running database initialization...", flush=True)
     try:
         from database import init_db
         init_db()
-        print("✅ [startup] Database tables initialized/verified (SQLite + Railway Volume safe)")
+        print("✅ [lifespan] Database initialization completed successfully.", flush=True)
     except Exception as e:
-        # Non-fatal: tables may already exist or minor issue; requests will surface real errors
-        print(f"⚠️ [startup] Database init note: {e}")
+        print(f"❌ [lifespan] CRITICAL: Database initialization failed: {e}", flush=True)
+        # We still continue — the error will surface on first DB access with a clear message.
 
     yield  # app is now running
 
