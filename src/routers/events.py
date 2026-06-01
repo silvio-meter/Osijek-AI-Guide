@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import Optional
 
+from core.exceptions import NotFoundException
+
 from database import get_db
 from models.event import Event
 from schemas.event import (
@@ -77,7 +79,7 @@ def get_event(
     event = db.query(Event).filter(Event.id == event_id).first()
 
     if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+        raise NotFoundException(message="Događaj nije pronađen.")
 
     return event
 
@@ -115,7 +117,7 @@ def update_event(
     """Update an existing event (full update). Protected."""
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+        raise NotFoundException(message="Događaj nije pronađen.")
 
     for key, value in event_in.model_dump().items():
         setattr(event, key, value)
@@ -143,7 +145,7 @@ def delete_event(
     """
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+        raise NotFoundException(message="Događaj nije pronađen.")
 
     event.is_active = False
     db.commit()

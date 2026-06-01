@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse
 
 from core.security import decode_token
 from schemas.error import ErrorResponse
+from core.error_messages import get_friendly_message
 
 
 import os
@@ -116,9 +117,14 @@ async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) 
     """
     retry_after = getattr(exc, "retry_after", 60)
 
+    # Dan 2 Sprint: bolje logiranje rate limitinga
+    key = get_rate_limit_key(request)
+    logger = __import__("logging").getLogger("lega.rate_limit")
+    logger.warning(f"[RATE_LIMIT] Rate limit exceeded | key={key} | path={request.url.path} | retry_after={retry_after}s")
+
     error_response = ErrorResponse(
         error="rate_limit_exceeded",
-        message="Previše zahtjeva u kratkom vremenu. Molimo pričekajte prije sljedećeg pokušaja.",
+        message=get_friendly_message("rate_limit_exceeded"),
         details={"retry_after_seconds": int(retry_after)},
     )
 

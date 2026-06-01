@@ -165,7 +165,8 @@ class ChatHistoryManager:
         user_message: str,
         ai_tool_call_message: Optional[Dict] = None,   # AI message that requested tools
         tool_messages: Optional[List[Dict]] = None,    # List of tool results
-        final_ai_message: Optional[str] = None         # Final natural language response
+        final_ai_message: Optional[str] = None,        # Final natural language response
+        performance: Optional[Dict] = None             # Dan 17: {time_to_first_token, total_duration}
     ):
         """
         Saves a complete turn, including tool usage if it happened.
@@ -183,7 +184,10 @@ class ChatHistoryManager:
             history.extend(tool_messages)
 
         if final_ai_message:
-            history.append({"role": "assistant", "content": final_ai_message})
+            assistant_msg = {"role": "assistant", "content": final_ai_message}
+            if performance:
+                assistant_msg["performance"] = performance
+            history.append(assistant_msg)
 
         self.save_history(user_id, history)
 

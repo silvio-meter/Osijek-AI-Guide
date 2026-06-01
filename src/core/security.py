@@ -150,13 +150,18 @@ def save_refresh_token(db: Session, user_id: int, jti: str, expires_at: datetime
 
 
 def revoke_refresh_token(db: Session, jti: str) -> bool:
-    """Revoke (blacklist) a refresh token by its jti."""
+    """Revoke (blacklist) a refresh token by its jti.
+    Returns True if the token was successfully revoked (or was already revoked).
+    """
     token_record = db.query(RefreshToken).filter(RefreshToken.jti == jti).first()
-    if token_record and not token_record.revoked:
-        token_record.revoked = True
-        db.commit()
-        return True
-    return False
+    if not token_record:
+        return False
+    if token_record.revoked:
+        return True  # Already revoked - idempotent
+
+    token_record.revoked = True
+    db.commit()
+    return True
 
 
 def is_refresh_token_valid(db: Session, jti: str) -> bool:

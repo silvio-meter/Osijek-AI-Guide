@@ -6,6 +6,7 @@ to consistent ErrorResponse objects.
 """
 
 from typing import Any, Optional
+from core.error_messages import get_friendly_message
 
 
 class AppException(Exception):
@@ -28,10 +29,10 @@ class AppException(Exception):
 class NotFoundException(AppException):
     """Resource not found."""
 
-    def __init__(self, message: str = "Resource not found", details: Any = None):
+    def __init__(self, message: str = None, details: Any = None):
         super().__init__(
             error_code="not_found",
-            message=message,
+            message=message or "Traženi resurs nije pronađen.",
             status_code=404,
             details=details,
         )
@@ -40,10 +41,10 @@ class NotFoundException(AppException):
 class UnauthorizedException(AppException):
     """Authentication required or failed."""
 
-    def __init__(self, message: str = "Authentication required", details: Any = None):
+    def __init__(self, message: str = None, details: Any = None):
         super().__init__(
             error_code="unauthorized",
-            message=message,
+            message=message or get_friendly_message("unauthorized"),
             status_code=401,
             details=details,
         )
@@ -64,10 +65,10 @@ class ForbiddenException(AppException):
 class ValidationException(AppException):
     """Input validation failed."""
 
-    def __init__(self, message: str = "Validation error", details: Any = None):
+    def __init__(self, message: str = None, details: Any = None):
         super().__init__(
             error_code="validation_error",
-            message=message,
+            message=message or get_friendly_message("validation_error"),
             status_code=422,
             details=details,
         )
@@ -78,14 +79,26 @@ class RateLimitException(AppException):
 
     def __init__(
         self,
-        message: str = "Rate limit exceeded",
+        message: str = None,
         retry_after: Optional[int] = None,
         details: Any = None,
     ):
         super().__init__(
             error_code="rate_limit_exceeded",
-            message=message,
+            message=message or get_friendly_message("rate_limit_exceeded"),
             status_code=429,
             details=details,
         )
         self.retry_after = retry_after
+
+
+class ConflictException(AppException):
+    """Resource conflict (e.g. duplicate email on register)."""
+
+    def __init__(self, message: str = "Conflict", details: Any = None):
+        super().__init__(
+            error_code="conflict",
+            message=message,
+            status_code=409,
+            details=details,
+        )

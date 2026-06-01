@@ -1,13 +1,18 @@
 # Lega API – Vodič za mobilnu aplikaciju (Flutter / React Native)
 
-Ovaj dokument je **glavni referentni vodič** za developere mobilne aplikacije Osijek AI Guide (Lega).
+**VAŽNO:** Ovo je **praktični implementacijski vodič**. 
+
+**Autoritativni izvor specifikacije je:**
+→ [`mobile-mvp-api-contract.md` (v1.0 Frozen)](mobile-mvp-api-contract.md)
+
+Sve što je napisano u ovom dokumentu treba biti usklađeno s ugovorom. Ako postoji neslaganje, vrijedi ugovor.
 
 ## Osnovne informacije
 
 - **Base URL (development):** `http://localhost:8000`
-- **Base URL (production):** (bit će definirano nakon deploya)
+- **Base URL (production):** `https://osijek-ai-guide-production.up.railway.app`
 - **OpenAPI dokumentacija:** `/docs` (Swagger) i `/redoc`
-- **Verzija API-ja:** 0.6.0+
+- **Verzija API-ja:** 0.6.0+ (vidi ugovor za točnu specifikaciju)
 
 ---
 
@@ -70,7 +75,13 @@ Zaštićeni endpointi (`/chat`, `/user/me`, `/chat/*`) zahtijevaju JWT access to
    }
    ```
 
-**Preporuka za mobilnu app:** Spremaj `access_token` u secure storage (Flutter: `flutter_secure_storage`). Koristi refresh token za automatsko osvježavanje.
+**Preporuka za mobilnu app (obvezno prema ugovoru):**
+- Spremaj oba tokena **isključivo** u `flutter_secure_storage`.
+- Implementiraj automatski refresh na 401.
+- Ako refresh vrati 401 → odmah odjavi korisnika.
+- Preporučuje se proaktivni refresh (npr. 2 minute prije isteka access tokena).
+
+Detalji: vidi sekciju 6 u `mobile-mvp-api-contract.md`.
 
 ---
 
@@ -166,9 +177,22 @@ Authorization: Bearer <token>
 ```http
 POST /chat/stream?message=Što večeras ima u Tvrđi?&language=hr
 Authorization: Bearer <token>
+Accept: text/event-stream
 ```
 
-Odgovor je Server-Sent Events (SSE).
+Odgovor je **Server-Sent Events (SSE)**.
+
+**Važni formati događaja (točno prema ugovoru v1.0):**
+- `data: {"content": "tekst"}` → token odgovora
+- `data: [DONE]` → uspješan završetak
+- `data: {"error": "tool_execution_error", "message": "..."}` → greška tijekom streama
+
+**Obvezno ponašanje na klijentu (MUST iz ugovora):**
+- Reconnect max 3x s exponential backoff (1s → 2s → 4s)
+- Timeout 30s bez podataka → reconnect
+- Ako stigne error event → prekini stream i prikaži poruku + retry gumb
+
+Puni detalji u sekciji 4.1 `mobile-mvp-api-contract.md`.
 
 #### Reset razgovora
 ```http
@@ -201,13 +225,28 @@ POST /user/me/preferences
 
 ---
 
+## Error Handling (važno za kvalitetan UX)
+
+Svi endpointi vraćaju greške u standardiziranom formatu:
+
+```json
+{
+  "error": "string",      // npr. "unauthorized", "tool_execution_error", "rate_limit_exceeded"
+  "message": "string",    // korisniku prijateljska poruka (hrvatski)
+  "details": object | null
+}
+```
+
+**Preporučeni error kodovi i ponašanje** detaljno su opisani u sekciji 5 `mobile-mvp-api-contract.md` (Error Code Catalog).
+
 ## Najbolje prakse za Flutter aplikaciju
 
 1. **Koristi Dio** ili **http** + interceptor za automatsko dodavanje `Authorization` headera.
 2. **Cache** javne podatke (events, POI) lokalno (npr. Hive ili SharedPreferences + TTL).
-3. **Streaming chat** koristi `SSE` client (postoje dobri Flutter paketi: `sse` ili `eventsource`).
-4. **Error handling** — koristi standardizirani `ErrorResponse` format koji backend vraća.
-5. **Rate limiting** — backend ima zaštitu. Ako dobiješ 429, prikaži korisniku "Previše zahtjeva, pokušaj malo kasnije".
+3. **Streaming chat** koristi `SSE` client. **Obvezno** implementiraj reconnect logiku prema ugovoru (max 3 pokušaja + timeout 30s).
+4. **Error handling** — koristi standardizirani `ErrorResponse` format + Error Code Catalog iz ugovora.
+5. **Rate limiting** — backend ima zaštitu. Ako dobiješ 429, poštuj `Retry-After` header ako postoji.
+6. **Token management** — slijedi točno strategiju iz sekcije 6 ugovora (flutter_secure_storage + auto-refresh + logout na failed refresh).
 
 ---
 

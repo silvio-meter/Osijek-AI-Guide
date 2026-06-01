@@ -33,7 +33,7 @@ from models.user import User
 from models.refresh_token import RefreshToken
 
 # Standardized exceptions (Week 2 - Dan 3)
-from core.exceptions import UnauthorizedException, ValidationException
+from core.exceptions import UnauthorizedException, ValidationException, ConflictException, ForbiddenException
 
 # Rate Limiting (Week 2)
 from core.rate_limiter import (
@@ -77,18 +77,18 @@ def register_user(
     # Check if user already exists
     existing_user = db.query(User).filter(User.email == email).first()
     if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="User with this email already exists"
+        raise ConflictException(
+            message="Korisnik s ovom email adresom već postoji.",
+            details={"email": email}
         )
 
     # Hash the password
     try:
         hashed_password = get_password_hash(user_in.password)
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(e)
+        raise ValidationException(
+            message="Lozinka ne zadovoljava zahtjeve.",
+            details={"reason": str(e)}
         )
 
     # Create user
@@ -106,9 +106,9 @@ def register_user(
         db.refresh(new_user)
     except IntegrityError:
         db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="User with this email already exists"
+        raise ConflictException(
+            message="Korisnik s ovom email adresom već postoji.",
+            details={"email": email}
         )
 
     return UserResponse.model_validate(new_user)
@@ -156,6 +156,9 @@ def login(
     expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     save_refresh_token(db, user_id=user.id, jti=jti, expires_at=expires_at)
 
+    logger = logging.getLogger("lega.auth")
+    logger.info(f"[AUTH] Successful login + refresh token issued | user_id={user.id} | jti={jti[:8]}...")
+
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
@@ -195,28 +198,49 @@ def refresh_token(
 
     # Check database blacklist + expiry
     if not is_refresh_token_valid(db, jti):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token has been revoked or expired"
+        logger = logging.getLogger("lega.auth")
+        logger.warning(f"[AUTH] Refresh token invalid (revoked/expired) | jti={jti[:8]}... | user_id={user_id}")
+        raise UnauthorizedException(
+            message="Refresh token je poništen ili istekao (rotacija ili logout)."
         )
 
     # Verify user still exists and is active
     user = db.query(User).filter(User.id == user_id).first()
     if not user or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive"
+        logger = logging.getLogger("lega.auth")
+        logger.warning(f"[AUTH] Refresh attempted for inactive/missing user | user_id={user_id}")
+        raise UnauthorizedException(
+            message="Korisnik nije pronađen ili je neaktivan."
         )
 
-    # Revoke the old refresh token (rotation)
-    revoke_refresh_token(db, jti)
-
-    # Issue new tokens
+    # Safer rotation (Dan 11):
+    # 1. First create and persist the new refresh token
+    # 2. Only then revoke the old one.
+    # This way, if creating/saving the new token fails, the old one remains usable.
     access_token = create_access_token(user_id=user.id, email=user.email)
     new_refresh_token, new_jti = create_refresh_token(user_id=user.id)
 
     new_expires = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    save_refresh_token(db, user_id=user.id, jti=new_jti, expires_at=new_expires)
+
+    try:
+        save_refresh_token(db, user_id=user.id, jti=new_jti, expires_at=new_expires)
+        logger = logging.getLogger("lega.auth")
+        logger.info(f"[AUTH] New refresh token created | new_jti={new_jti[:8]}... | user_id={user_id}")
+
+        # Now safely revoke the old one
+        revoked = revoke_refresh_token(db, jti)
+        logger.info(f"[AUTH] Refresh rotation: old jti revoked={revoked} | old_jti={jti[:8]}... | user_id={user_id}")
+
+    except Exception as e:
+        logger = logging.getLogger("lega.auth")
+        logger.exception(
+            f"[AUTH][CRITICAL] Failed to save new refresh token during rotation! "
+            f"Old token may still be valid. | user_id={user_id} | email={user.email} | old_jti={jti[:8]}..."
+        )
+        # Re-raise so the client gets an error and can retry
+        raise
+
+    logger.info(f"[AUTH] New refresh token issued successfully | new_jti={new_jti[:8]}... | user_id={user_id}")
 
     return TokenResponse(
         access_token=access_token,
@@ -239,7 +263,9 @@ def logout(
     if payload and payload.get("type") == "refresh":
         jti = payload.get("jti")
         if jti:
-            revoke_refresh_token(db, jti)
+            revoked = revoke_refresh_token(db, jti)
+            logger = logging.getLogger("lega.auth")
+            logger.info(f"[AUTH] Logout revocation | jti={jti[:8]}... | revoked={revoked}")
 
     # Always return success (don't leak information)
     return {"message": "Successfully logged out"}

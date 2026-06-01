@@ -40,8 +40,10 @@ Admin / Protected:
 Run with: PYTHONPATH=src uvicorn src.api:app --reload --port 8000
 """
 
+import asyncio
 import logging
 import sys
+import time
 import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -119,6 +121,7 @@ from core.exceptions import (
     ValidationException,
     RateLimitException,
 )
+from core.error_messages import get_friendly_message
 
 # Security Middleware (Week 2 - Dan 4)
 from core.security_middleware import SecurityHeadersMiddleware, PayloadSizeLimitMiddleware
@@ -263,15 +266,25 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         error_code = "forbidden"
     elif exc.status_code == 404:
         error_code = "not_found"
+    elif exc.status_code == 409:
+        error_code = "conflict"
     elif exc.status_code == 422:
         error_code = "validation_error"
+
+    # Dan 14: Bolja integracija s centralnim katalogom poruka
+    if isinstance(exc.detail, str):
+        message = get_friendly_message(error_code, exc.detail)
+        details = None
+    else:
+        message = get_friendly_message(error_code, "Došlo je do neočekivane greške. Molimo pokušajte kasnije.")
+        details = exc.detail
 
     return JSONResponse(
         status_code=exc.status_code,
         content=ErrorResponse(
             error=error_code,
-            message=exc.detail if isinstance(exc.detail, str) else "An error occurred",
-            details=exc.detail if not isinstance(exc.detail, str) else None,
+            message=message,
+            details=details,
         ).model_dump(),
     )
 
@@ -369,6 +382,41 @@ plain_llm = ChatXAI(
     xai_api_key=os.getenv("XAI_API_KEY")
 )
 
+
+def invoke_llm_with_retry(
+    chain_or_llm,
+    input_data,
+    max_retries: int = 1,
+    base_delay: float = 0.8,
+    max_delay: float = 3.0,
+):
+    """
+    Dan 14: Poboljšani retry wrapper za LLM pozive.
+    - 1 retry po defaultu (može se povećati)
+    - Mali jitter da se izbjegne thundering herd
+    - Bolje logiranje
+    """
+    import random
+
+    last_exception = None
+    for attempt in range(max_retries + 1):
+        try:
+            return chain_or_llm.invoke(input_data)
+        except Exception as e:
+            last_exception = e
+            logger = logging.getLogger("lega.api")
+
+            if attempt < max_retries:
+                # Jednostavni jitter (0.8x - 1.2x od base_delay)
+                delay = min(base_delay * (1 + random.uniform(-0.2, 0.2)), max_delay)
+                logger.warning(
+                    f"[CHAT] LLM invoke failed (attempt {attempt+1}/{max_retries+1}), retrying in {delay:.1f}s... | error={str(e)[:120]}"
+                )
+                time.sleep(delay)
+            else:
+                logger.exception(f"[CHAT] LLM invoke failed after {max_retries+1} attempts")
+    raise last_exception
+
 # ======================
 # Pydantic Models
 # ======================
@@ -401,6 +449,16 @@ class PreferenceUpdate(BaseModel):
     preferred_areas: Optional[List[str]] = None
     dietary: Optional[List[str]] = None
 
+
+# ======================
+# Streaming Helpers (Dan 6 - bolja konzistentnost error događaja)
+# ======================
+
+def sse_error(error_code: str, message: str) -> str:
+    """Helper za slanje strukturiranog error događaja u Server-Sent Events streamu."""
+    return f"data: {json.dumps({'error': error_code, 'message': message})}\n\n"
+
+
 # ======================
 # Endpoints
 # ======================
@@ -410,16 +468,25 @@ def root():
     return {"message": "Osijek AI Guide API is running. Ready for mobile app."}
 
 
-@app.get("/debug/last-crash")
+@app.get("/debug/last-crash", include_in_schema=False)
 def get_last_crash():
-    """Temporary debug endpoint to retrieve the last unhandled exception details.
-    Useful when Railway logs are hard to access.
+    """Temporary debug endpoint (only available in testing / explicit debug mode).
+
+    In production (Railway) this returns 404 so it is not part of the public surface.
+    Enable locally with: TESTING=1  or  ENABLE_DEBUG_ENDPOINTS=1
     """
+    if not (IS_TESTING or os.getenv("ENABLE_DEBUG_ENDPOINTS") == "1"):
+        # Hide completely from production
+        raise HTTPException(status_code=404, detail="Not found")
+
     try:
         with open("/app/data/last_crash.txt", encoding="utf-8") as f:
             return {"content": f.read()}
     except FileNotFoundError:
-        return {"error": "No crash file found yet. No unhandled exception has occurred since last restart."}
+        return {
+            "error": "not_found",
+            "message": "Nema zapisa o zadnjoj grešci od zadnjeg restarta."
+        }
 
 
 @app.get("/health", tags=["Public Data"])
@@ -529,12 +596,31 @@ async def chat_with_lega(
     ]
     prompt = ChatPromptTemplate.from_messages(prompt_messages)
 
-    # First LLM call
-    chain = prompt | llm_with_tools
-    ai_response = chain.invoke({
-        "input": chat_request.message,
-        "chat_history": []
-    })
+    try:
+        # First LLM call (with retry - Dan 12)
+        chain = prompt | llm_with_tools
+        ai_response = invoke_llm_with_retry(chain, {
+            "input": chat_request.message,
+            "chat_history": []
+        })
+    except Exception as e:
+        logger = logging.getLogger("lega.api")
+        logger.exception(
+            f"[CHAT] Initial LLM/tool resolution FAILED after retries | user_id={user_id} | msg_preview='{chat_request.message[:60]}...'"
+        )
+        if stream:
+            async def error_stream():
+                yield sse_error("internal_server_error", get_friendly_message("llm_error"))
+            return StreamingResponse(error_stream(), media_type="text/event-stream")
+        else:
+            return JSONResponse(
+                status_code=500,
+                content=ErrorResponse(
+                    error="internal_server_error",
+                    message=get_friendly_message("llm_error"),
+                    details=None,
+                ).model_dump(),
+            )
 
     tools_used = []
     tool_messages_for_storage = []
@@ -542,11 +628,18 @@ async def chat_with_lega(
     if hasattr(ai_response, "tool_calls") and ai_response.tool_calls:
         tools = {t.name: t for t in get_all_tools()}
         executed_tool_messages = []
+        any_tool_failed = False  # Dan 6 - konzistentno rukovanje grešaka u streaming putu
 
         for tool_call in ai_response.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call.get("args", {})
-            tool_id = tool_call["id"]
+            # Safe extraction - handles both dict and ToolCall object from LangChain
+            if isinstance(tool_call, dict):
+                tool_name = tool_call.get("name") or tool_call.get("function", {}).get("name")
+                tool_args = tool_call.get("args") or tool_call.get("function", {}).get("arguments", {})
+                tool_id = tool_call.get("id") or tool_call.get("tool_call_id")
+            else:
+                tool_name = getattr(tool_call, "name", None) or getattr(getattr(tool_call, "function", None), "name", None)
+                tool_args = getattr(tool_call, "args", {}) or getattr(getattr(tool_call, "function", None), "arguments", {})
+                tool_id = getattr(tool_call, "id", None) or getattr(tool_call, "tool_call_id", None)
             tools_used.append(tool_name)
 
             # Record tool usage for metrics (Dan 4)
@@ -560,7 +653,10 @@ async def chat_with_lega(
                     tool_func = tools[tool_name]
                     tool_result = tool_func.invoke(tool_args) if tool_args else tool_func.invoke({})
                 except Exception as e:
+                    logger = logging.getLogger("lega.api")
+                    logger.exception(f"[CHAT] Tool execution FAILED | user_id={user_id} | tool={tool_name}")
                     tool_result = f"Greška: {str(e)}"
+                    any_tool_failed = True
             else:
                 tool_result = f"Tool {tool_name} nije dostupan."
 
@@ -591,29 +687,61 @@ async def chat_with_lega(
         final_messages.extend(executed_tool_messages)
 
         if stream:
-            # Real streaming using astream
+            # Dan 12: Graceful degradation - čak i ako su neki toolovi pali, pokušaj generirati finalni odgovor
+            # (tool rezultati već sadrže "Greška: ..." stringove)
+            if any_tool_failed:
+                logger = logging.getLogger("lega.api")
+                logger.warning(f"[CHAT] Some tools failed for user {user_id}, but proceeding with final LLM generation for graceful response")
+
+            # Proceed to generate final answer (graceful path)
+
+            # Normalan streaming put (svi toolovi su uspješno izvršeni)
             async def stream_real():
-                async for chunk in plain_llm.astream(final_messages):
-                    if chunk.content:
-                        yield f"data: {json.dumps({'content': chunk.content})}\n\n"
-                yield "data: [DONE]\n\n"
+                accumulated = ""
+                try:
+                    async for chunk in plain_llm.astream(final_messages):
+                        if chunk.content:
+                            text = chunk.content
+                            accumulated += text
+                            yield f"data: {json.dumps({'content': text})}\n\n"
+                    yield "data: [DONE]\n\n"
+                except asyncio.CancelledError:
+                    logger = logging.getLogger("lega.api")
+                    logger.warning(
+                        f"[CHAT][STREAM] stream_real cancelled (client disconnect) | user_id={user_id} | partial={len(accumulated)}"
+                    )
+                    raise
+                except Exception as e:
+                    logger = logging.getLogger("lega.api")
+                    logger.exception(
+                        f"[CHAT][STREAM] astream after tools FAILED | user_id={user_id} | tools_used={tools_used}"
+                    )
+                    yield sse_error("internal_server_error", get_friendly_message("internal_server_error"))
 
-            # We still need to save the history. We have to generate the full answer once for saving.
-            # (Trade-off: one extra generation for history. Acceptable for now.)
-            final_response_obj = plain_llm.invoke(final_messages)
-            final_answer = final_response_obj.content
+            # Generate once for history (with retry - Dan 12)
+            try:
+                final_response_obj = invoke_llm_with_retry(plain_llm, final_messages)
+                final_answer = final_response_obj.content
+            except Exception as e:
+                logger = logging.getLogger("lega.api")
+                logger.exception("Error generating final answer for history after retries (streaming path)")
+                final_answer = get_friendly_message("llm_error")
 
-            chat_history_manager.add_full_turn(
-                user_id=user_id,
-                user_message=chat_request.message,
-                ai_tool_call_message=ai_tool_call_msg,
-                tool_messages=tool_messages_for_storage,
-                final_ai_message=final_answer
-            )
+            try:
+                chat_history_manager.add_full_turn(
+                    user_id=user_id,
+                    user_message=chat_request.message,
+                    ai_tool_call_message=ai_tool_call_msg,
+                    tool_messages=tool_messages_for_storage,
+                    final_ai_message=final_answer
+                )
+            except Exception as e:
+                logger = logging.getLogger("lega.api")
+                logger.exception(f"[CHAT][STREAM] History save FAILED after streaming | user_id={user_id}")
 
             return StreamingResponse(stream_real(), media_type="text/event-stream")
         else:
-            final_response_obj = plain_llm.invoke(final_messages)
+            final_response_obj = invoke_llm_with_retry(plain_llm, final_messages)
             final_answer = final_response_obj.content
 
             chat_history_manager.add_full_turn(
@@ -635,20 +763,45 @@ async def chat_with_lega(
 
         if stream:
             async def stream_direct():
-                async for chunk in plain_llm.astream(final_messages):
-                    if chunk.content:
-                        yield f"data: {json.dumps({'content': chunk.content})}\n\n"
-                yield "data: [DONE]\n\n"
+                accumulated = ""
+                try:
+                    async for chunk in plain_llm.astream(final_messages):
+                        if chunk.content:
+                            text = chunk.content
+                            accumulated += text
+                            yield f"data: {json.dumps({'content': text})}\n\n"
+                    yield "data: [DONE]\n\n"
+                except asyncio.CancelledError:
+                    logger = logging.getLogger("lega.api")
+                    logger.warning(
+                        f"[CHAT][STREAM] stream_direct cancelled (client disconnect) | user_id={user_id} | partial={len(accumulated)}"
+                    )
+                    raise
+                except Exception as e:
+                    logger = logging.getLogger("lega.api")
+                    logger.exception(
+                        f"[CHAT][STREAM] Direct astream FAILED (no tools) | user_id={user_id}"
+                    )
+                    yield sse_error("internal_server_error", get_friendly_message("internal_server_error"))
 
-            # Generate once for history
-            final_response_obj = plain_llm.invoke(final_messages)
-            final_answer = final_response_obj.content
+            # Generate once for history (with protection)
+            try:
+                final_response_obj = plain_llm.invoke(final_messages)
+                final_answer = final_response_obj.content
+            except Exception as e:
+                logger = logging.getLogger("lega.api")
+                logger.exception(f"[CHAT][STREAM] Final invoke for history FAILED (direct path) | user_id={user_id}")
+                final_answer = get_friendly_message("llm_error")
 
-            chat_history_manager.add_full_turn(
-                user_id=user_id,
-                user_message=chat_request.message,
-                final_ai_message=final_answer
-            )
+            try:
+                chat_history_manager.add_full_turn(
+                    user_id=user_id,
+                    user_message=chat_request.message,
+                    final_ai_message=final_answer
+                )
+            except Exception as e:
+                logger = logging.getLogger("lega.api")
+                logger.exception(f"[CHAT][STREAM] History save FAILED (direct streaming path) | user_id={user_id}")
 
             return StreamingResponse(stream_direct(), media_type="text/event-stream")
         else:
@@ -694,6 +847,17 @@ async def chat_stream(
     Then only the final answer is streamed token-by-token.
     Perfect for smooth mobile chat UX.
     """
+    # Dan 16: Eksplicitna validacija duljine poruke
+    if len(message) > 4000:
+        raise ValidationException(
+            message=get_friendly_message("message_too_long"),
+            details={"max_length": 4000, "current_length": len(message)}
+        )
+    if len(message.strip()) == 0:
+        raise ValidationException(
+            message=get_friendly_message("message_empty")
+        )
+
     # Use authenticated user when possible
     effective_user_id = str(current_user.id)
     if user_id and user_id != "default_user":
@@ -722,6 +886,9 @@ async def chat_stream(
             )
 
     # Context
+    logger = logging.getLogger("lega.api")
+    logger.info(f"[CHAT][STREAM] Streaming request started | user_id={effective_user_id} | msg_preview='{message[:80]}...'")
+
     user_context_str = get_user_context_for_prompt(effective_user_id)
     system_prompt = get_system_prompt(language)
     if user_context_str and "Korisnik još nema spremljene osobne preferencije" not in user_context_str:
@@ -736,46 +903,186 @@ async def chat_stream(
         ("human", "{input}")
     ])
 
-    # Resolve tools first (non-streaming)
-    chain = prompt | llm_with_tools
-    ai_response = chain.invoke({"input": message, "chat_history": []})
+    try:
+        # Resolve tools first (non-streaming) - with retry (Dan 12)
+        chain = prompt | llm_with_tools
+        ai_response = invoke_llm_with_retry(chain, {"input": message, "chat_history": []})
+    except Exception as e:
+        logger = logging.getLogger("lega.api")
+        logger.exception(
+            f"[CHAT][STREAM] Initial LLM/tool resolution FAILED after retries | user_id={effective_user_id} | msg='{message[:60]}...'"
+        )
+        return JSONResponse(
+            status_code=500,
+            content=ErrorResponse(
+                error="internal_server_error",
+                message=get_friendly_message("llm_error"),
+                details=None,
+            ).model_dump(),
+        )
 
     if hasattr(ai_response, "tool_calls") and ai_response.tool_calls:
         # Execute tools
         tools = {t.name: t for t in get_all_tools()}
         tool_msgs = []
-        for tc in ai_response.tool_calls:
-            tool_name = tc["name"]
-            try:
-                # Record tool usage for metrics
-                tool_usage_tracker.record_tool_use(effective_user_id, tool_name)
-            except Exception as e:
-                print(f"[metrics] Failed to record tool usage: {e}")
+        tool_execution_failed = False
 
-            try:
-                res = tools[tool_name].invoke(tc.get("args", {})) if tc.get("args") else tools[tool_name].invoke({})
-            except Exception as e:
-                res = f"Greška: {e}"
-            tool_msgs.append(ToolMessage(content=str(res), tool_call_id=tc["id"], name=tool_name))
+        try:
+            for tc in ai_response.tool_calls:
+                tool_name = tc["name"]
+                try:
+                    tool_usage_tracker.record_tool_use(effective_user_id, tool_name)
+                except Exception as e:
+                    print(f"[metrics] Failed to record tool usage: {e}")
+
+                try:
+                    res = tools[tool_name].invoke(tc.get("args", {})) if tc.get("args") else tools[tool_name].invoke({})
+                except Exception as e:
+                    res = f"Greška: {e}"
+                    tool_execution_failed = True
+                tool_msgs.append(ToolMessage(content=str(res), tool_call_id=tc["id"], name=tool_name))
+        except Exception as e:
+            logger = logging.getLogger("lega.api")
+            logger.exception(
+                f"[CHAT][STREAM] Tool execution block FAILED | user_id={effective_user_id}"
+            )
+            tool_execution_failed = True
+            tool_msgs = []  # Don't send partial tool results
 
         full_msgs = prompt.invoke({"input": message, "chat_history": []}).to_messages()
         full_msgs.append(ai_response)
         full_msgs.extend(tool_msgs)
 
         async def stream_after_tools():
-            async for chunk in plain_llm.astream(full_msgs):
-                if chunk.content:
-                    yield f"data: {json.dumps({'content': chunk.content})}\n\n"
-            yield "data: [DONE]\n\n"
+            """Dan 17: Generator s performance metrikama."""
+            start_time = time.time()
+            first_token_time = None
+            accumulated = ""
+            logger = logging.getLogger("lega.api")
+
+            if tool_execution_failed:
+                try:
+                    chat_history_manager.add_full_turn(
+                        user_id=effective_user_id,
+                        user_message=message,
+                        ai_tool_call_message={"role": "assistant", "content": "", "tool_calls": ai_response.tool_calls},
+                        tool_messages=tool_msgs,
+                        final_ai_message=get_friendly_message("tool_execution_error")
+                    )
+                except Exception as e:
+                    logger.exception(f"[CHAT][STREAM] History save FAILED after tool error | user_id={effective_user_id}")
+
+                logger.info(f"[CHAT][STREAM] Tool error stream returned | user_id={effective_user_id} | duration={time.time()-start_time:.2f}s")
+                yield sse_error("tool_execution_error", get_friendly_message("tool_execution_error"))
+                return
+
+            try:
+                async for chunk in plain_llm.astream(full_msgs):
+                    if chunk.content:
+                        if first_token_time is None:
+                            first_token_time = time.time() - start_time
+                        text = chunk.content
+                        accumulated += text
+                        yield f"data: {json.dumps({'content': text})}\n\n"
+                yield "data: [DONE]\n\n"
+
+                total_duration = time.time() - start_time
+                time_to_first = first_token_time or 0.0
+
+                logger.info(f"[CHAT][STREAM] Successful stream completed | user_id={effective_user_id} | ttft={time_to_first:.2f}s | duration={total_duration:.2f}s | length={len(accumulated)}")
+
+                # Uspješan završetak – spremi puni odgovor s metrikama
+                try:
+                    chat_history_manager.add_full_turn(
+                        user_id=effective_user_id,
+                        user_message=message,
+                        ai_tool_call_message={"role": "assistant", "content": "", "tool_calls": ai_response.tool_calls},
+                        tool_messages=tool_msgs,
+                        final_ai_message=accumulated,
+                        performance={
+                            "time_to_first_token": round(time_to_first, 2),
+                            "total_duration": round(total_duration, 2)
+                        }
+                    )
+                except Exception as e:
+                    logger.exception(f"[CHAT][STREAM] History save FAILED after successful stream | user_id={effective_user_id}")
+
+            except asyncio.CancelledError:
+                duration = time.time() - start_time
+                logger.warning(
+                    f"[CHAT][STREAM] Stream cancelled (client disconnect or timeout) | user_id={effective_user_id} | duration={duration:.2f}s | partial_length={len(accumulated)}"
+                )
+                if accumulated:
+                    try:
+                        chat_history_manager.add_full_turn(
+                            user_id=effective_user_id,
+                            user_message=message,
+                            ai_tool_call_message={"role": "assistant", "content": "", "tool_calls": ai_response.tool_calls},
+                            tool_messages=tool_msgs,
+                            final_ai_message=accumulated + " [STREAM INTERRUPTED]"
+                        )
+                    except Exception as e:
+                        logger.exception(f"[CHAT][STREAM] Partial history save FAILED after cancellation | user_id={effective_user_id}")
+                raise
+
+            except Exception as e:
+                duration = time.time() - start_time
+                logger.exception(
+                    f"[CHAT][STREAM] astream after tools FAILED | user_id={effective_user_id} | duration={duration:.2f}s"
+                )
+                yield sse_error("internal_server_error", get_friendly_message("internal_server_error"))
 
         return StreamingResponse(stream_after_tools(), media_type="text/event-stream")
     else:
         # No tools needed - stream directly
         async def stream_direct():
-            async for chunk in plain_llm.astream(prompt.invoke({"input": message, "chat_history": []})):
-                if chunk.content:
-                    yield f"data: {json.dumps({'content': chunk.content})}\n\n"
-            yield "data: [DONE]\n\n"
+            """Dan 10: Poboljšani generator s timingom."""
+            start_time = time.time()
+            accumulated = ""
+            logger = logging.getLogger("lega.api")
+
+            try:
+                async for chunk in plain_llm.astream(prompt.invoke({"input": message, "chat_history": []})):
+                    if chunk.content:
+                        text = chunk.content
+                        accumulated += text
+                        yield f"data: {json.dumps({'content': text})}\n\n"
+                yield "data: [DONE]\n\n"
+
+                duration = time.time() - start_time
+                logger.info(f"[CHAT][STREAM] Direct stream completed | user_id={effective_user_id} | duration={duration:.2f}s | length={len(accumulated)}")
+
+                try:
+                    chat_history_manager.add_full_turn(
+                        user_id=effective_user_id,
+                        user_message=message,
+                        final_ai_message=accumulated
+                    )
+                except Exception as e:
+                    logger.exception(f"[CHAT][STREAM] History save FAILED after direct stream | user_id={effective_user_id}")
+
+            except asyncio.CancelledError:
+                duration = time.time() - start_time
+                logger.warning(
+                    f"[CHAT][STREAM] Direct stream cancelled (client disconnect) | user_id={effective_user_id} | duration={duration:.2f}s | partial_length={len(accumulated)}"
+                )
+                if accumulated:
+                    try:
+                        chat_history_manager.add_full_turn(
+                            user_id=effective_user_id,
+                            user_message=message,
+                            final_ai_message=accumulated + " [STREAM INTERRUPTED]"
+                        )
+                    except Exception as e:
+                        logger.exception(f"[CHAT][STREAM] Partial history save FAILED after direct cancellation | user_id={effective_user_id}")
+                raise
+
+            except Exception as e:
+                duration = time.time() - start_time
+                logger.exception(
+                    f"[CHAT][STREAM] Direct astream FAILED | user_id={effective_user_id} | duration={duration:.2f}s"
+                )
+                yield sse_error("internal_server_error", get_friendly_message("internal_server_error"))
 
         return StreamingResponse(stream_direct(), media_type="text/event-stream")
 
@@ -903,7 +1210,13 @@ def get_events(
                 "source": "tool_hybrid"
             }
         except Exception:
-            return {"events": [], "count": 0, "error": "Failed to parse result"}
+            # Dan 9 - bolja konzistentnost (iako je ovo fallback put)
+            return {
+                "events": [],
+                "count": 0,
+                "error": "internal_error",
+                "message": get_friendly_message("internal_server_error")
+            }
 
     return {"text": result, "source": "tool"}
 
@@ -921,7 +1234,7 @@ def get_my_profile(current_user: User = Depends(get_current_active_user)):
 def get_user_profile(user_id: str, current_user: User = Depends(get_current_active_user)):
     # For now only allow users to access their own profile (or make admin check later)
     if str(current_user.id) != user_id:
-        raise HTTPException(status_code=403, detail="You can only access your own profile")
+        raise ForbiddenException(message="Možete pristupiti samo vlastitom profilu.")
     profile = user_context_manager.load_profile(user_id)
     return profile.__dict__
 
@@ -1162,7 +1475,10 @@ def submit_feedback(
     user_id = str(current_user.id)
 
     if rating not in (1, -1):
-        raise HTTPException(status_code=400, detail="rating must be 1 (up) or -1 (down)")
+        raise ValidationException(
+            message="Ocjena mora biti 1 (like) ili -1 (dislike).",
+            details={"valid_values": [1, -1]}
+        )
 
     try:
         feedback_manager.record_feedback(
@@ -1172,7 +1488,10 @@ def submit_feedback(
             comment=comment
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise ValidationException(
+            message=get_friendly_message("internal_server_error"),
+            details={"reason": str(e)[:200]}
+        )
 
     return {
         "message": "Feedback recorded. Thank you!",

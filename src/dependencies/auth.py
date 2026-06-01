@@ -15,6 +15,9 @@ from database import get_db
 from models.user import User
 from core.security import decode_token
 
+# Standardized exceptions for consistent ErrorResponse format
+from core.exceptions import UnauthorizedException, ForbiddenException
+
 # Use HTTPBearer for clean "Authorization: Bearer <token>" handling
 security = HTTPBearer(auto_error=False)
 
@@ -33,56 +36,53 @@ def get_current_user(
     - User does not exist or is inactive
     """
     if not credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
+        raise UnauthorizedException(
+            message="Niste autentificirani. Potreban je valjani access token.",
+            details={"reason": "no_token"}
         )
 
     token = credentials.credentials
     payload = decode_token(token)
 
     if not payload:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
+        raise UnauthorizedException(
+            message="Token je nevažeći ili istekao.",
+            details={"reason": "invalid_or_expired"}
         )
 
     # Only allow access tokens for protected routes (not refresh tokens)
     if payload.get("type") != "access":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token type",
-            headers={"WWW-Authenticate": "Bearer"},
+        raise UnauthorizedException(
+            message="Nevažeći tip tokena (očekivan access token).",
+            details={"reason": "wrong_token_type"}
         )
 
     user_id = payload.get("sub")
     if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
+        raise UnauthorizedException(
+            message="Nevažeći sadržaj tokena.",
+            details={"reason": "invalid_payload"}
         )
 
     try:
         user_id_int = int(user_id)
     except (ValueError, TypeError):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid user identifier in token",
+        raise UnauthorizedException(
+            message="Nevažeći identifikator korisnika u tokenu.",
+            details={"reason": "invalid_user_id"}
         )
 
     user = db.query(User).filter(User.id == user_id_int).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
+        raise UnauthorizedException(
+            message="Korisnik nije pronađen.",
+            details={"reason": "user_not_found"}
         )
 
     if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive",
+        raise ForbiddenException(
+            message="Korisnički račun je neaktivan.",
+            details={"reason": "account_inactive"}
         )
 
     return user

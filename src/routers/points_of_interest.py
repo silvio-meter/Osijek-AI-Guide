@@ -23,6 +23,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
+# Standardized exceptions for consistent error responses
+from core.exceptions import NotFoundException, ValidationException, ConflictException
+
 from database import get_db
 from models.point_of_interest import PointOfInterest
 from schemas.poi import (
@@ -186,7 +189,7 @@ def get_point_of_interest(poi_id: int, db: Session = Depends(get_db)):
     ).first()
 
     if not poi:
-        raise HTTPException(status_code=404, detail="Point of interest not found")
+        raise NotFoundException(message="Točka interesa nije pronađena.")
 
     return poi
 
@@ -204,7 +207,10 @@ def create_point_of_interest(
     # Basic slug uniqueness check
     existing = db.query(PointOfInterest).filter(PointOfInterest.slug == poi_in.slug).first()
     if existing:
-        raise HTTPException(status_code=400, detail="Slug already exists")
+        raise ConflictException(
+            message="Slug već postoji. Odaberite drugi identifikator.",
+            details={"slug": poi_in.slug}
+        )
 
     poi = PointOfInterest(**poi_in.model_dump())
     db.add(poi)
@@ -223,7 +229,7 @@ def update_point_of_interest(
     """Update an existing Point of Interest."""
     poi = db.query(PointOfInterest).filter(PointOfInterest.id == poi_id).first()
     if not poi:
-        raise HTTPException(status_code=404, detail="Point of interest not found")
+        raise NotFoundException(message="Točka interesa nije pronađena.")
 
     # Check for slug conflict (if slug is being changed)
     if poi_in.slug != poi.slug:
@@ -232,7 +238,10 @@ def update_point_of_interest(
             PointOfInterest.id != poi_id
         ).first()
         if slug_exists:
-            raise HTTPException(status_code=400, detail="Slug already in use")
+            raise ConflictException(
+                message="Slug već koristi druga točka interesa.",
+                details={"slug": poi_in.slug}
+            )
 
     for key, value in poi_in.model_dump().items():
         setattr(poi, key, value)
@@ -254,7 +263,7 @@ def delete_point_of_interest(
     """
     poi = db.query(PointOfInterest).filter(PointOfInterest.id == poi_id).first()
     if not poi:
-        raise HTTPException(status_code=404, detail="Point of interest not found")
+        raise NotFoundException(message="Točka interesa nije pronađena.")
 
     poi.is_active = False
     db.commit()
