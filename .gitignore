@@ -26,6 +26,11 @@ env/
 ENV/
 .venv/
 
+# Testing & linting caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # IDE
 .vscode/
 .idea/
@@ -34,6 +39,7 @@ ENV/
 
 # OS
 .DS_Store
+**/.DS_Store
 Thumbs.db
 
 # Streamlit
