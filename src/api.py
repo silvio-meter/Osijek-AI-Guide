@@ -92,6 +92,7 @@ from user_context import (
     user_context_manager,
     get_user_context_for_prompt,
     chat_history_manager,
+    get_safe_history_for_llm,
 )
 from tool_usage import tool_usage_tracker
 from feedback import feedback_manager
@@ -229,6 +230,20 @@ app.add_middleware(
     max_age=600,  # Cache preflight requests for 10 minutes
 )
 
+
+def _add_cors_headers_for_dev(resp: Response, request: Request) -> None:
+    """Belt-and-suspenders for web dev: ensure Access-Control-Allow-Origin on *all* responses
+    (including early error JSONs, Streaming error streams, and unhandled exceptions). This prevents
+    browser CORS blocks when the backend returns 4xx/5xx for /chat etc from localhost:xxxx (Flutter web).
+    CORSMiddleware handles the happy path and preflights; this makes error bodies readable by JS.
+    """
+    origin = request.headers.get("origin") or "*"
+    resp.headers["access-control-allow-origin"] = origin
+    if origin != "*":
+        resp.headers["access-control-allow-credentials"] = "true"
+    resp.headers.setdefault("access-control-allow-headers", "authorization, content-type")
+
+
 # ======================
 # Rate Limiting (Week 2 - Dan 1)
 # ======================
@@ -276,10 +291,10 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         message = get_friendly_message(error_code, exc.detail)
         details = None
     else:
-        message = get_friendly_message(error_code, "Došlo je do neočekivane greške. Molimo pokušajte kasnije.")
+        message = get_friendly_message(error_code, get_friendly_message("internal_server_error"))
         details = exc.detail
 
-    return JSONResponse(
+    resp = JSONResponse(
         status_code=exc.status_code,
         content=ErrorResponse(
             error=error_code,
@@ -287,6 +302,8 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             details=details,
         ).model_dump(),
     )
+    _add_cors_headers_for_dev(resp, request)
+    return resp
 
 
 @app.exception_handler(Exception)
@@ -335,14 +352,16 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     except Exception as write_err:
         print(f"Failed to write crash file: {write_err}", flush=True)
 
-    return JSONResponse(
+    resp = JSONResponse(
         status_code=500,
         content=ErrorResponse(
             error="internal_server_error",
-            message="An unexpected error occurred. The error has been logged.",
+            message=get_friendly_message("internal_server_error"),
             details=None,
         ).model_dump(),
     )
+    _add_cors_headers_for_dev(resp, request)
+    return resp
 
 
 # ======================
@@ -547,33 +566,28 @@ async def chat_with_lega(
 
     language = chat_request.language
 
-    # Load full previous message history (now supports tool calls)
-    raw_history = chat_history_manager.load_history(user_id)
+    # Load + NORMALIZE using the new safe helper (big quality improvement)
+    chat_history_messages = get_safe_history_for_llm(user_id, chat_request.max_history)
 
-    # Apply client-requested history limit (for token / cost control)
+    # === DIAGNOSTIC (transition period) ===
+    logger = logging.getLogger("lega.api")
+    raw_history = chat_history_manager.load_history(user_id)
     if chat_request.max_history and chat_request.max_history > 0:
         raw_history = raw_history[-chat_request.max_history:]
+    has_tool_turns = any(m.get("tool_calls") or m.get("role") == "tool" for m in raw_history)
+    logger.info(
+        f"[DIAG][HISTORY][/chat] load_history user={user_id} msgs={len(raw_history)} "
+        f"contains_tool_turns={has_tool_turns} | using_safe_normalizer=True"
+    )
 
-    # Rebuild LangChain messages (including tool calls and tool results)
-    chat_history_messages = []
-    for msg in raw_history:
-        if msg["role"] == "user":
-            chat_history_messages.append(("human", msg["content"]))
-        elif msg["role"] == "assistant":
-            if msg.get("tool_calls"):
-                chat_history_messages.append(
-                    AIMessage(content=msg.get("content") or "", tool_calls=msg["tool_calls"])
-                )
-            else:
-                chat_history_messages.append(("assistant", msg["content"]))
-        elif msg["role"] == "tool":
-            chat_history_messages.append(
-                ToolMessage(
-                    content=msg["content"],
-                    tool_call_id=msg.get("tool_call_id", ""),
-                    name=msg.get("name", "")
-                )
-            )
+    # === DIAGNOSTIC: reconstruction result for /chat path ===
+    logger = logging.getLogger("lega.api")
+    tool_call_samples = []
+    for m in chat_history_messages:
+        if hasattr(m, "tool_calls") and getattr(m, "tool_calls", None):
+            tc = m.tool_calls[0] if isinstance(m.tool_calls, (list, tuple)) else m.tool_calls
+            tool_call_samples.append(repr(type(tc)))
+    logger.info(f"[DIAG][HISTORY][/chat] Rebuilt {len(chat_history_messages)} msgs | tool_call_types_sample={tool_call_samples[:2]}")
 
     # User context + system prompt
     user_context_str = get_user_context_for_prompt(user_id)
@@ -602,7 +616,7 @@ async def chat_with_lega(
         ai_response = invoke_llm_with_retry(chain, {
             "input": chat_request.message,
             "chat_history": []
-        })
+        }, max_retries=3)
     except Exception as e:
         logger = logging.getLogger("lega.api")
         logger.exception(
@@ -611,9 +625,11 @@ async def chat_with_lega(
         if stream:
             async def error_stream():
                 yield sse_error("internal_server_error", get_friendly_message("llm_error"))
-            return StreamingResponse(error_stream(), media_type="text/event-stream")
+            err_stream = StreamingResponse(error_stream(), media_type="text/event-stream")
+            _add_cors_headers_for_dev(err_stream, request)
+            return err_stream
         else:
-            return JSONResponse(
+            err_resp = JSONResponse(
                 status_code=500,
                 content=ErrorResponse(
                     error="internal_server_error",
@@ -621,6 +637,8 @@ async def chat_with_lega(
                     details=None,
                 ).model_dump(),
             )
+            _add_cors_headers_for_dev(err_resp, request)
+            return err_resp
 
     tools_used = []
     tool_messages_for_storage = []
@@ -863,27 +881,27 @@ async def chat_stream(
     if user_id and user_id != "default_user":
         effective_user_id = user_id
 
-    # Load history (respecting max_history)
-    raw_history = chat_history_manager.load_history(effective_user_id)
+    # Load + NORMALIZE (single source of truth for safe tool_calls reconstruction)
+    chat_history_messages = get_safe_history_for_llm(effective_user_id, max_history)
+
+    # === DIAGNOSTIC LOGGING (kept for visibility during transition) ===
+    logger = logging.getLogger("lega.api")
+    raw_history = chat_history_manager.load_history(effective_user_id)  # still load raw for diag
     if max_history and max_history > 0:
         raw_history = raw_history[-max_history:]
+    has_tool_turns = any(m.get("tool_calls") or m.get("role") == "tool" for m in raw_history)
+    logger.info(
+        f"[DIAG][HISTORY][STREAM] load_history user={effective_user_id} msgs={len(raw_history)} "
+        f"contains_tool_turns={has_tool_turns} | using_safe_normalizer=True"
+    )
 
-    # Rebuild messages
-    chat_history_messages = []
-    for msg in raw_history:
-        if msg["role"] == "user":
-            chat_history_messages.append(("human", msg["content"]))
-        elif msg["role"] == "assistant":
-            if msg.get("tool_calls"):
-                chat_history_messages.append(
-                    AIMessage(content=msg.get("content") or "", tool_calls=msg["tool_calls"])
-                )
-            else:
-                chat_history_messages.append(("assistant", msg["content"]))
-        elif msg["role"] == "tool":
-            chat_history_messages.append(
-                ToolMessage(content=msg["content"], tool_call_id=msg.get("tool_call_id", ""), name=msg.get("name", ""))
-            )
+    # === DIAGNOSTIC: what did we actually reconstruct? (critical for AIMessage tool_calls roundtrip bugs) ===
+    tool_call_samples = []
+    for m in chat_history_messages:
+        if hasattr(m, "tool_calls") and m.tool_calls:
+            tc = m.tool_calls[0] if isinstance(m.tool_calls, (list, tuple)) else m.tool_calls
+            tool_call_samples.append(f"tool_calls[0] type={type(tc).__name__} keys_or_attrs={getattr(tc, 'keys', lambda: dir(tc))() if hasattr(tc,'keys') else 'obj'}")
+    logger.info(f"[DIAG][HISTORY][STREAM] Rebuilt {len(chat_history_messages)} LangChain msgs | tool_call_samples={tool_call_samples[:2]}")
 
     # Context
     logger = logging.getLogger("lega.api")
@@ -906,13 +924,15 @@ async def chat_stream(
     try:
         # Resolve tools first (non-streaming) - with retry (Dan 12)
         chain = prompt | llm_with_tools
-        ai_response = invoke_llm_with_retry(chain, {"input": message, "chat_history": []})
+        # Use higher retries for the tool-selection LLM call (first hop), as this is the main source of intermittent 500s on web.
+        ai_response = invoke_llm_with_retry(chain, {"input": message, "chat_history": []}, max_retries=3)
     except Exception as e:
         logger = logging.getLogger("lega.api")
         logger.exception(
             f"[CHAT][STREAM] Initial LLM/tool resolution FAILED after retries | user_id={effective_user_id} | msg='{message[:60]}...'"
         )
-        return JSONResponse(
+        # Ensure CORS headers on error responses for web clients (localhost dev etc).
+        err_resp = JSONResponse(
             status_code=500,
             content=ErrorResponse(
                 error="internal_server_error",
@@ -920,6 +940,8 @@ async def chat_stream(
                 details=None,
             ).model_dump(),
         )
+        _add_cors_headers_for_dev(err_resp, request)
+        return err_resp
 
     if hasattr(ai_response, "tool_calls") and ai_response.tool_calls:
         # Execute tools
@@ -1210,12 +1232,13 @@ def get_events(
                 "source": "tool_hybrid"
             }
         except Exception:
-            # Dan 9 - bolja konzistentnost (iako je ovo fallback put)
+            # Dan 9 - bolja konzistentnost (fallback put)
             return {
                 "events": [],
                 "count": 0,
-                "error": "internal_error",
-                "message": get_friendly_message("internal_server_error")
+                "error": "internal_server_error",
+                "message": get_friendly_message("internal_server_error"),
+                "details": None
             }
 
     return {"text": result, "source": "tool"}
@@ -1494,7 +1517,7 @@ def submit_feedback(
         )
 
     return {
-        "message": "Feedback recorded. Thank you!",
+        "message": "Feedback zabilježen. Hvala!",
         "user_id": user_id,
         "message_index": message_index,
         "rating": rating

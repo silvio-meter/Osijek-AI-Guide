@@ -20,11 +20,11 @@ ERROR_MESSAGES: Dict[str, str] = {
     "unauthorized": "Niste autentificirani. Molimo prijavite se ponovo.",
     "invalid_or_expired_token": "Vaša sesija je istekla ili je token nevažeći. Prijavite se ponovo.",
     "refresh_token_revoked": "Vaša sesija je poništena (odjavljeni ste na drugom uređaju ili na drugom mjestu).",
-    "forbidden": "Nemate dozvolu za ovu radnju.",
+    "forbidden": "Nemate dozvolu za ovu radnju. Ako mislite da je riječ o grešci, kontaktirajte podršku.",
     "account_inactive": "Vaš korisnički račun je privremeno deaktiviran. Kontaktirajte podršku.",
 
     # === Validacija ===
-    "validation_error": "Uneseni podaci nisu ispravni. Provjerite unos i pokušajte ponovo.",
+    "validation_error": "Uneseni podaci nisu ispravni. Provjerite unos (npr. duljinu poruke) i pokušajte ponovo.",
     "invalid_email": "Molimo unesite ispravnu email adresu.",
     "weak_password": "Lozinka mora imati najmanje 8 znakova.",
     "invalid_rating": "Ocjena mora biti 1 (like) ili -1 (dislike).",
@@ -44,10 +44,10 @@ ERROR_MESSAGES: Dict[str, str] = {
     "internal_server_error": "Došlo je do neočekivane greške. Naš tim je obaviješten i radi na rješenju.",
 
     # === Općenito ===
-    "not_found": "Traženi resurs nije pronađen.",
-    "conflict": "Došlo je do konflikta s postojećim podacima. Molimo osvježite stranicu i pokušajte ponovo.",
-    "service_unavailable": "Servis trenutno nije dostupan. Molimo pokušajte kasnije.",
-    "timeout": "Zahtjev je trajao predugo. Molimo pokušajte ponovo.",
+    "not_found": "Traženi podatak nije pronađen. Provjerite je li poveznica ili identifikator ispravan.",
+    "conflict": "Došlo je do konflikta s postojećim podacima. Molimo osvježite aplikaciju i pokušajte ponovo.",
+    "service_unavailable": "Servis trenutno nije dostupan. Molimo pokušajte kasnije ili provjerite internetsku vezu.",
+    "timeout": "Zahtjev je trajao predugo. Molimo pokušajte ponovo ili provjerite internetsku vezu.",
 }
 
 
@@ -62,4 +62,4 @@ def get_friendly_message(error_code: str, default: str = None) -> str:
     if default:
         return default
 
-    return "Došlo je do greške. Molimo pokušajte kasnije."
+    return "Došlo je do neočekivane greške. Molimo pokušajte ponovo ili kasnije."

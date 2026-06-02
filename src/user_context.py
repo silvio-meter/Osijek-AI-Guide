@@ -178,6 +178,13 @@ class ChatHistoryManager:
         history.append({"role": "user", "content": user_message})
 
         if ai_tool_call_message:
+            # === DIAGNOSTIC LOGGING for tool_calls JSON roundtrip (root cause of post-tool 500s) ===
+            tc = ai_tool_call_message.get("tool_calls") if isinstance(ai_tool_call_message, dict) else None
+            tc_info = f"present={bool(tc)} len={len(tc) if tc else 0}"
+            if tc and isinstance(tc, (list, tuple)) and tc:
+                t0 = tc[0]
+                tc_info += f" t0_type={type(t0).__name__} t0_repr[:180]={str(t0)[:180]}"
+            print(f"[DIAG][HISTORY][SAVE] add_full_turn tool_calls | {tc_info}", flush=True)
             history.append(ai_tool_call_message)
 
         if tool_messages:
@@ -222,3 +229,90 @@ class ChatHistoryManager:
 
 # Global instance
 chat_history_manager = ChatHistoryManager()
+
+
+# ============================================================
+# SAFE HISTORY NORMALIZATION (added 2026-06 during autonomous fix session)
+# This is the recommended mitigation for the post-tool-turn 500 root cause.
+# ============================================================
+
+from typing import Any
+
+try:
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.messages.tool import ToolCall
+except ImportError:
+    AIMessage = ToolMessage = ToolCall = None  # type: ignore
+
+
+def _safe_tool_calls(raw: Any) -> list[dict] | list:
+    """
+    Normalize whatever we got from JSON (or from LangChain on save) into
+    a list of plain dicts with stable keys: id, name, args.
+    This is the single most important function for fixing the 500s.
+    """
+    if not raw:
+        return []
+
+    result = []
+    for tc in raw if isinstance(raw, (list, tuple)) else [raw]:
+        if isinstance(tc, dict):
+            result.append({
+                "id": tc.get("id") or tc.get("tool_call_id") or "",
+                "name": tc.get("name") or tc.get("function", {}).get("name", ""),
+                "args": tc.get("args") or tc.get("function", {}).get("arguments", {}) or {},
+            })
+        elif hasattr(tc, "name"):  # LangChain ToolCall or similar
+            result.append({
+                "id": getattr(tc, "id", "") or getattr(tc, "tool_call_id", ""),
+                "name": getattr(tc, "name", ""),
+                "args": getattr(tc, "args", {}) or {},
+            })
+        else:
+            # Last resort – keep it, the diag logs will catch the weird case
+            result.append(tc)
+    return result
+
+
+def normalize_to_langchain_messages(raw_history: List[Dict[str, Any]]) -> List[Any]:
+    """
+    The single source of truth for turning stored JSON history into
+    something safe to feed LangChain.
+
+    Use this in BOTH /chat and /chat/stream paths instead of the inline fragile loops.
+    """
+    if AIMessage is None or ToolMessage is None:
+        # LangChain not available in this environment – return something that at least doesn't crash
+        return raw_history
+
+    out: List[Any] = []
+    for msg in raw_history:
+        role = msg.get("role")
+        if role == "user":
+            out.append(("human", msg.get("content", "")))
+        elif role == "assistant":
+            if msg.get("tool_calls"):
+                clean_calls = _safe_tool_calls(msg["tool_calls"])
+                out.append(AIMessage(content=msg.get("content") or "", tool_calls=clean_calls))
+            else:
+                out.append(("assistant", msg.get("content", "")))
+        elif role == "tool":
+            out.append(
+                ToolMessage(
+                    content=msg.get("content", ""),
+                    tool_call_id=msg.get("tool_call_id", ""),
+                    name=msg.get("name", ""),
+                )
+            )
+    return out
+
+
+def get_safe_history_for_llm(user_id: str, max_history: int | None = None) -> List[Any]:
+    """
+    Convenience wrapper used by api.py.
+    Load + trim + normalize in one call.
+    """
+    raw = chat_history_manager.load_history(user_id)
+    if max_history and max_history > 0:
+        raw = raw[-max_history:]
+    return normalize_to_langchain_messages(raw)
