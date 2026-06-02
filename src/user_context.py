@@ -19,8 +19,10 @@ Future extensions (when needed):
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 import json
+import logging
 import os
 from pathlib import Path
+from datetime import datetime, timezone
 
 @dataclass
 class UserProfile:
@@ -142,13 +144,40 @@ class ChatHistoryManager:
         return self.storage_path / f"{user_id}.json"
 
     def load_history(self, user_id: str) -> List[Dict]:
-        """Returns the full list of messages in a serializable format."""
+        """Returns the full list of messages in a serializable format.
+
+        Defensive: if the per-user JSON file is corrupted (common after previous
+        bad tool_calls serializations), we log the problem, preserve the bad file
+        for diagnostics (rename to .bad.{ts}.json), and return [] so the chat
+        request doesn't explode with 500.
+        """
         path = self._get_file_path(user_id)
-        if path.exists():
+        if not path.exists():
+            return []
+
+        try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return data.get("messages", [])
-        return []
+            return data.get("messages", []) if isinstance(data, dict) else []
+        except Exception as e:
+            logger = logging.getLogger("lega.api")
+            try:
+                bad_snippet = path.read_text(encoding="utf-8")[:300]
+            except Exception:
+                bad_snippet = "<could not read file>"
+            logger.exception(
+                f"[HISTORY] Corrupted history file for user={user_id} at {path}. "
+                f"Error: {e}. First 300 chars of bad file:\n{bad_snippet}"
+            )
+            # Preserve the bad file so we can debug the exact corruption
+            try:
+                ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                bad_path = path.with_suffix(f".bad.{ts}.json")
+                path.rename(bad_path)
+                logger.info(f"[HISTORY] Bad history preserved as {bad_path}")
+            except Exception as rename_err:
+                logger.warning(f"[HISTORY] Could not rename bad file: {rename_err}")
+            return []
 
     def save_history(self, user_id: str, messages: List[Dict]):
         """Saves messages, trimming to max_messages if necessary."""
