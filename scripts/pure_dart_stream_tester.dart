@@ -53,22 +53,23 @@ Future<void> main(List<String> args) async {
       return;
     }
 
-    // 3. Manual SSE parsing (similar to what the fixed chat_stream_service does)
-    final buffer = StringBuffer();
+    // 3. Manual SSE parsing (exact same safe logic as the fixed chat_stream_service.dart)
+    // Use plain String + direct slice (no StringBuffer + clear + substring-after-clear bug)
+    String buffer = '';
     int chunkCount = 0;
     final contents = <String>[];
 
     await for (final data in resp) {
       chunkCount++;
       final chunk = utf8.decode(data);
-      buffer.write(chunk);
+      if (chunk.isEmpty) continue;
+      buffer += chunk;
 
-      // Simple event extraction like the fixed client parser
+      // Safe event extraction
       int idx;
-      while ((idx = buffer.toString().indexOf('\n\n')) != -1) {
-        final event = buffer.toString().substring(0, idx).trim();
-        buffer.clear();
-        buffer.write(buffer.toString().substring(idx + 2)); // keep tail
+      while ((idx = buffer.indexOf('\n\n')) != -1) {
+        final event = buffer.substring(0, idx).trim();
+        buffer = buffer.substring(idx + 2); // safe, no clear-then-read-self
 
         if (event.isEmpty) continue;
 
