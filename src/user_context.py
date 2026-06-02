@@ -255,6 +255,44 @@ class ChatHistoryManager:
         self.save_history(user_id, history)
         return True
 
+    def repair_corrupted_history(self, user_id: str, also_reset_main: bool = True) -> dict:
+        """Repair utility for corrupted per-user history files.
+
+        - Deletes all {user_id}.bad*.json files (the ones created by defensive load_history).
+        - If also_reset_main=True and the main file is still unreadable, deletes it too.
+        Returns a dict with what was cleaned.
+        This is the "repair endpoint" companion.
+        """
+        path = self._get_file_path(user_id)
+        cleaned: list[str] = []
+
+        # 1. Remove all backup bad files
+        for bad_file in list(path.parent.glob(f"{user_id}.bad*.json")):
+            try:
+                bad_file.unlink()
+                cleaned.append(bad_file.name)
+            except Exception as e:
+                logging.getLogger("lega.api").warning(f"Failed to delete bad file {bad_file}: {e}")
+
+        # 2. Optionally clean the main file if it's still broken
+        if also_reset_main and path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    json.load(f)
+                # File is valid, do nothing
+            except Exception:
+                try:
+                    path.unlink()
+                    cleaned.append(path.name)
+                except Exception as e:
+                    logging.getLogger("lega.api").warning(f"Failed to delete main history {path}: {e}")
+
+        return {
+            "user_id": user_id,
+            "cleaned_files": cleaned,
+            "also_reset_main": also_reset_main,
+        }
+
 
 # Global instance
 chat_history_manager = ChatHistoryManager()

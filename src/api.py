@@ -1490,16 +1490,19 @@ def reset_chat_history(
     
     By default, user preferences are preserved.
     """
+    # Always repair (clean any .bad.* backup files from previous corruption) as part of reset
+    repair_result = chat_history_manager.repair_corrupted_history(user_id, also_reset_main=False)
     deleted = chat_history_manager.delete_history(user_id)
     
-    if deleted:
+    if deleted or repair_result.get("cleaned_files"):
         msg = f"Chat history for user '{user_id}' has been reset."
+        if repair_result.get("cleaned_files"):
+            msg += f" Also cleaned corrupted backup files: {repair_result['cleaned_files']}"
         if keep_preferences:
             msg += " Preferences have been preserved."
         else:
-            # Future: could clear preferences here if needed
             msg += " Preferences were also cleared (not yet implemented)."
-        return {"message": msg, "user_id": user_id, "keep_preferences": keep_preferences}
+        return {"message": msg, "user_id": user_id, "keep_preferences": keep_preferences, "repair": repair_result}
     else:
         return {
             "message": f"No chat history found for user '{user_id}'. Nothing to reset.",
@@ -1517,13 +1520,17 @@ def reset_my_chat(
     Uses the user_id from the JWT token.
     """
     user_id = str(current_user.id)
+    # Always repair corrupted backups as part of user-initiated reset
+    repair_result = chat_history_manager.repair_corrupted_history(user_id, also_reset_main=False)
     deleted = chat_history_manager.delete_history(user_id)
     
-    if deleted:
+    if deleted or repair_result.get("cleaned_files"):
         msg = "Your chat history has been reset."
+        if repair_result.get("cleaned_files"):
+            msg += f" (also removed corrupted backup files: {repair_result['cleaned_files']})"
         if keep_preferences:
             msg += " Your preferences have been preserved."
-        return {"message": msg, "keep_preferences": keep_preferences}
+        return {"message": msg, "keep_preferences": keep_preferences, "repair": repair_result}
     else:
         return {"message": "You had no chat history to reset."}
 
@@ -1536,6 +1543,25 @@ def delete_last_chat_message(user_id: str):
         return {"message": f"Last message for user '{user_id}' has been deleted."}
     else:
         return {"message": f"No messages found for user '{user_id}'."}
+
+
+@app.post("/chat/history/{user_id}/repair")
+def repair_chat_history(
+    user_id: str,
+    also_reset_main: bool = Query(True, description="Also delete the main history file if it is still unreadable"),
+):
+    """Repair endpoint for corrupted chat history (the .bad.* files created by defensive load_history).
+
+    This is the admin/ops companion to the automatic recovery added in load_history.
+    It cleans .bad backup files and (optionally) the main file if it is still broken.
+
+    In production this should be protected behind admin auth or a one-time token.
+    """
+    result = chat_history_manager.repair_corrupted_history(user_id, also_reset_main=also_reset_main)
+    return {
+        "message": "History repair completed",
+        **result,
+    }
 
 # ======================
 # Tool Usage Metrics (Week 5 - Dan 4)
