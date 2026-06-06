@@ -640,6 +640,23 @@ async def chat_with_lega(
             f"Ako je relevantno, možeš eksplicitno spomenuti zašto nešto preporučuješ na temelju njegovih preferencija."
         )
 
+    # === FORCE tool call for recurring schedule problems (e.g. Dječje kazalište raspored) ===
+    # This ensures we always fetch fresh data via search_osijek_events (hybrid + Tavily site:) 
+    # even if the LLM would otherwise skip the tool call. Works for "dječje kazalište", kina, etc.
+    msg_lower = chat_request.message.lower()
+    schedule_keywords = ["dječje kazalište", "djecje kazalište", "kazalištu", "raspored predstava", "predstave u kazalištu", "predstave u dječjem", "raspored u dječjem", "kino urania", "kino europa", "cinestar"]
+    if any(kw in msg_lower for kw in schedule_keywords):
+        try:
+            events_data = search_osijek_events.invoke({"query": chat_request.message, "structured": False})
+            system_prompt += (
+                f"\n\n**OBAVEZNI PODACI IZ PRETRAGE DOGAĐAJA (koristi ovo kao primarni izvor, ne izmišljaj):**\n"
+                f"{events_data}\n\n"
+                f"Ako podaci ne sadrže točan raspored za iduća 3 dana, reci iskreno da trenutno nemaš detaljan raspored u podacima i predloži da korisnik provjeri direktno na webu ili FB, ali daj alternativni plan ako možeš."
+            )
+            print(f"[CHAT] Forced events tool for schedule query: {chat_request.message[:50]}...")
+        except Exception as e:
+            print(f"[CHAT] Forced events tool failed: {e}")
+
     prompt_messages = [
         ("system", system_prompt),
         *chat_history_messages,
@@ -952,6 +969,22 @@ async def chat_stream(
             f"\n\n**VAŽNO - Korisničke preferencije:**\n{user_context_str}\n\n"
             f"Uputa: Prilikom davanja preporuka uvijek uzimaj u obzir ove preferencije."
         )
+
+    # === FORCE tool call for recurring schedule problems (e.g. Dječje kazalište raspored) ===
+    # Same as non-stream path: ensure we fetch via search_osijek_events for these queries.
+    msg_lower = message.lower()
+    schedule_keywords = ["dječje kazalište", "djecje kazalište", "kazalištu", "raspored predstava", "predstave u kazalištu", "predstave u dječjem", "raspored u dječjem", "kino urania", "kino europa", "cinestar"]
+    if any(kw in msg_lower for kw in schedule_keywords):
+        try:
+            events_data = search_osijek_events.invoke({"query": message, "structured": False})
+            system_prompt += (
+                f"\n\n**OBAVEZNI PODACI IZ PRETRAGE DOGAĐAJA (koristi ovo kao primarni izvor, ne izmišljaj):**\n"
+                f"{events_data}\n\n"
+                f"Ako podaci ne sadrže točan raspored za iduća 3 dana, reci iskreno da trenutno nemaš detaljan raspored u podacima i predloži da korisnik provjeri direktno na webu ili FB, ali daj alternativni plan ako možeš."
+            )
+            print(f"[CHAT][STREAM] Forced events tool for schedule query: {message[:50]}...")
+        except Exception as e:
+            print(f"[CHAT][STREAM] Forced events tool failed: {e}")
 
     try:
         prompt = ChatPromptTemplate.from_messages([

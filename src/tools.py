@@ -12,6 +12,8 @@ import re
 import json
 from typing import List, Dict, Optional, Any
 from datetime import datetime as dt
+from pathlib import Path
+from functools import lru_cache
 
 # Tavily is optional - only imported if the package is installed
 try:
@@ -39,6 +41,56 @@ if TAVILY_AVAILABLE and TAVILY_API_KEY:
         tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
     except Exception as e:
         print(f"[tools] Failed to initialize Tavily client: {e}")
+
+
+@lru_cache(maxsize=1)
+def _get_place_web_map() -> dict:
+    """Load places from the mobile map data (source of truth for rich places + web URLs).
+    Returns lowercased name -> web URL for all places that have a website.
+    This allows the AI to target specific venue websites for current programs, menus, opening hours etc.
+    """
+    try:
+        # From src/tools.py -> Osijek-AI-Guide (parents[1]) -> sibling lega_mobile
+        base = Path(__file__).resolve().parents[1]
+        places_path = base.parent / "lega_mobile" / "assets" / "osijek_places.json"
+        with open(places_path, encoding="utf-8") as f:
+            places = json.load(f)
+
+        web_map = {}
+        for p in places:
+            web = p.get("web")
+            if web and str(web).strip():
+                web = str(web).strip()
+                name = p.get("name", "").lower().strip()
+                if name:
+                    web_map[name] = web
+                # Also index by id and some tags for better matching
+                pid = p.get("id", "").lower()
+                if pid:
+                    web_map[pid] = web
+                for tag in p.get("tags", []) or []:
+                    if tag and len(tag) > 3:
+                        web_map[tag.lower()] = web
+        return web_map
+    except Exception as e:
+        print(f"[tools] Could not load osijek_places.json for web map: {e}")
+        return {}
+
+
+def _get_site_restriction(query: str) -> str:
+    """If the query mentions a known place with a website, return a 'site:domain' restriction for Tavily."""
+    web_map = _get_place_web_map()
+    q_lower = query.lower()
+    for key, web in web_map.items():
+        if key in q_lower:
+            try:
+                from urllib.parse import urlparse
+                domain = urlparse(web).netloc
+                if domain:
+                    return f" site:{domain}"
+            except:
+                pass
+    return ""
 
 
 # ============================================================
@@ -164,7 +216,7 @@ def _build_smart_event_query(original_query: str) -> str:
     time_part = " ".join(time_boosters)
     
     # Final enhanced query
-    enhanced = f"{base} {time_part} koncert žurka festival utakmica izložba događaj 2026"
+    enhanced = f"{base} {time_part} koncert žurka festival utakmica izložba događaj 2026 raspored predstave kazalište kino"
     
     return enhanced
 
@@ -300,15 +352,18 @@ def get_hybrid_upcoming_events(
 @tool
 def search_osijek_events(query: str = "događaji", structured: bool = False) -> str:
     """
-    MANDATORY tool for any question about current or upcoming events in Osijek.
+    MANDATORY tool for ANY question about current or upcoming events, raspored, predstave, kazalište, kino, tjedni program in Osijek.
+    Especially for Dječje kazalište Branka Mihaljevića, Kino Urania, Kino Europa, CineStar, etc.
+
+    ALWAYS call this for queries containing raspored, predstave, kazalište, dječje, kino, program, što se događa, etc.
 
     Hybrid strategy (Opcija B):
     1. First tries curated (manually maintained) events from the database.
-    2. Then adds scraped events from local sources (osijek031 + sib + osijeknews).
+    2. Then adds scraped events from local sources (osijek031 + sib + osijeknews + djecje kazalište).
     3. Merges them intelligently (curated events have priority).
-    4. Falls back to Tavily web search only if the combined result is weak.
+    4. If schedule query or specific venue with web, ALWAYS supplements with Tavily site-restricted search for fresh data from the venue's own page.
 
-    This gives the best quality + coverage.
+    This gives the best quality + coverage. Never answer "nemam podataka" for these without calling this tool first.
     """
     # Use the shared hybrid logic (curated + scraped, no Tavily here)
     merged = []
@@ -326,47 +381,61 @@ def search_osijek_events(query: str = "događaji", structured: bool = False) -> 
         print(f"[events tool] Hybrid fetch error: {e}")
 
     if merged:
-        if structured:
-            return json.dumps(merged, ensure_ascii=False)
+        site_restriction = _get_site_restriction(query)
+        q_lower = query.lower()
+        is_schedule_query = any(kw in q_lower for kw in ["raspored", "predstave", "program", "kazalište", "kino", "dječje", "djecje", "predstava", "show", "performance", "tjedni"])
+        # If the query targets a specific place that has a web page (from map data),
+        # OR it's a schedule/program query for theater/cinema/venue (e.g. dječje kazalište),
+        # always supplement with site-restricted Tavily for current program/schedule.
+        # This ensures we get fresh data even if local scrapers hit anti-bot protection.
+        if site_restriction or is_schedule_query or not merged:
+            # fall through to (site-aware) Tavily
+            pass
+        else:
+            if structured:
+                return json.dumps(merged, ensure_ascii=False)
 
-        # Text formatting
-        reliable = []
-        uncertain = []
+            # Text formatting
+            reliable = []
+            uncertain = []
 
-        for ev in merged:
-            title = ev.get("title", "Događaj")
-            url = ev.get("url", "")
-            date_str = ev.get("start_date") or ev.get("date") or ev.get("date_text")
-            source = ev.get("source", "unknown")
+            for ev in merged:
+                title = ev.get("title", "Događaj")
+                url = ev.get("url", "")
+                date_str = ev.get("start_date") or ev.get("date") or ev.get("date_text")
+                source = ev.get("source", "unknown")
 
-            if date_str:
-                line = f"• **{title}** ({date_str})\n  Izvor: {source} → {url}"
-                reliable.append(line)
-            else:
-                line = f"• **{title}**\n  Izvor: {source} → {url}"
-                uncertain.append(line)
+                if date_str:
+                    line = f"• **{title}** ({date_str})\n  Izvor: {source} → {url}"
+                    reliable.append(line)
+                else:
+                    line = f"• **{title}**\n  Izvor: {source} → {url}"
+                    uncertain.append(line)
 
-        formatted = []
-        if reliable:
-            formatted.append("**S jasnim datumom:**\n" + "\n\n".join(reliable))
-        if uncertain:
-            formatted.append("**U narednim danima (točan datum nije pouzdano određen):**\n" + "\n\n".join(uncertain))
+            formatted = []
+            if reliable:
+                formatted.append("**S jasnim datumom:**\n" + "\n\n".join(reliable))
+            if uncertain:
+                formatted.append("**U narednim danima (točan datum nije pouzdano određen):**\n" + "\n\n".join(uncertain))
 
-        if formatted:
-            source_note = "kurirani + scraperi"
-            if curated_count > 0 and scraped_count == 0:
-                source_note = "kurirani događaji"
-            elif scraped_count > 0 and curated_count == 0:
-                source_note = "lokalni scraperi"
+            if formatted:
+                source_note = "kurirani + scraperi"
+                if curated_count > 0 and scraped_count == 0:
+                    source_note = "kurirani događaji"
+                elif scraped_count > 0 and curated_count == 0:
+                    source_note = "lokalni scraperi"
 
-            return f"Pronađeni događaji ({source_note}):\n\n" + "\n\n".join(formatted)
+                return f"Pronađeni događaji ({source_note}):\n\n" + "\n\n".join(formatted)
 
-    # === 4. Fallback: Tavily (only if hybrid result is too weak) ===
+    # === 4. Fallback / Supplement: Tavily (with site restriction for places that have web) ===
     if not tavily_client:
         return "Trenutno nemam dovoljno svježih podataka o događajima u Osijeku."
 
     try:
         enhanced_query = _build_smart_event_query(query)
+        site_restriction = _get_site_restriction(query)
+        if site_restriction:
+            enhanced_query = enhanced_query + site_restriction
         response = tavily_client.search(
             query=enhanced_query,
             max_results=8,
@@ -468,6 +537,9 @@ def search_restaurants_or_food(query: str = "restorani", structured: bool = Fals
 
     try:
         enhanced_query = _build_smart_food_query(query)
+        site_restriction = _get_site_restriction(query)
+        if site_restriction:
+            enhanced_query = enhanced_query + site_restriction
 
         response = tavily_client.search(
             query=enhanced_query,

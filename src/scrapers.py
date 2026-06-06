@@ -130,12 +130,28 @@ def fetch_osijek031_najave(days_ahead: int = 14, use_cache: bool = True, debug: 
         if not href.startswith("http"):
             href = "http://www.osijek031.com/" + href.lstrip("/")
 
+        # crude but useful location + short desc extraction for better mobile cards and "blizu" matching
+        loc = "Osijek"
+        tlow = title.lower()
+        if "tvrđa" in tlow or "tvrdja" in tlow:
+            loc = "Tvrđa"
+        elif "drava" in tlow:
+            loc = "Drava / obala"
+        elif "centar" in tlow or "trg" in tlow:
+            loc = "Centar"
+        elif "kopački" in tlow or "rit" in tlow:
+            loc = "Kopački rit"
+
+        short_desc = (title.strip()[:90] + "...") if len(title.strip()) > 90 else title.strip()
+
         events.append({
             "title": title.strip(),
             "url": href,
             "date": event_date.isoformat() if event_date else None,
             "source": "osijek031.com",
-            "has_reliable_date": event_date is not None
+            "has_reliable_date": event_date is not None,
+            "location": loc,
+            "short_description": short_desc,
         })
 
     # Early noise filter (saves work and detail fetches)
@@ -330,6 +346,13 @@ def fetch_local_osijek_events(days_ahead: int = 14, use_cache: bool = True) -> L
     except Exception as e:
         print(f"[scraper] sib.net.hr error: {e}")
 
+    # Dječje kazalište Branka Mihaljevića – tjedni raspored (specific venue program)
+    try:
+        events = fetch_djecje_kazaliste_program(days_ahead=days_ahead, use_cache=use_cache)
+        all_events.extend(events)
+    except Exception as e:
+        print(f"[scraper] djecje-kazaliste error: {e}")
+
     # Filtriraj šum (CineStar, Kino Urania dnevni programi itd.)
     all_events = [e for e in all_events if not _is_noise_event(e)]
 
@@ -469,7 +492,9 @@ def fetch_osijeknews_events(days_ahead: int = 14, use_cache: bool = True) -> Lis
                 "url": href if href.startswith("http") else "https://osijeknews.hr" + href,
                 "date": event_date.isoformat() if event_date else None,
                 "source": "osijeknews.hr",
-                "has_reliable_date": event_date is not None
+                "has_reliable_date": event_date is not None,
+                "location": "Osijek",
+                "short_description": title[:90],
             })
             collected += 1
 
@@ -560,7 +585,9 @@ def fetch_sib_events(days_ahead: int = 14, use_cache: bool = True) -> List[Dict]
             "url": href if href.startswith("http") else "https://sib.net.hr" + href,
             "date": event_date.isoformat() if event_date else None,
             "source": "sib.net.hr",
-            "has_reliable_date": event_date is not None
+            "has_reliable_date": event_date is not None,
+            "location": "Osijek",
+            "short_description": title[:90],
         })
 
     # Deduplicate
@@ -575,6 +602,137 @@ def fetch_sib_events(days_ahead: int = 14, use_cache: bool = True) -> List[Dict]
     unique.sort(key=lambda x: (0 if x["has_reliable_date"] else 1, x.get("date") or "9999-12-31"))
 
     result = unique[:40]
+
+    if use_cache:
+        _set_cache(cache_key, result)
+
+    return result
+
+
+def fetch_djecje_kazaliste_program(days_ahead: int = 14, use_cache: bool = True) -> List[Dict]:
+    """
+    Scraper for the official weekly/monthly program of Dječje kazalište Branka Mihaljevića.
+    Tries tjedni-raspored first, falls back to mjesecni-raspored if the page has anti-bot protection.
+    This ensures the AI has accurate, up-to-date info about shows in the next days at this specific venue.
+    """
+    cache_key = f"djecje_kazaliste_program_{days_ahead}"
+
+    if use_cache:
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; OsijekAI-Guide/1.0; +https://github.com)"
+    }
+
+    # Try tjedni first, fallback to mjesecni if we hit verification/loader page (anti-bot protection)
+    urls_to_try = [
+        "https://www.djecje-kazaliste.hr/tjedni-raspored/",
+        "https://www.djecje-kazaliste.hr/mjesecni-raspored/"
+    ]
+
+    resp = None
+    soup = None
+    for u in urls_to_try:
+        try:
+            resp = requests.get(u, headers=headers, timeout=12)
+            text = resp.text.lower()
+            if "verification" in text or "please wait" in text or "loader" in text or len(resp.text) < 4000:
+                print(f"[scraper] djecje hit verification on {u}, trying next...")
+                continue
+            soup = BeautifulSoup(resp.text, "lxml")
+            url = u  # remember which one worked
+            break
+        except Exception as e:
+            print(f"[scraper] Dječje kazalište fetch error on {u}: {e}")
+            continue
+
+    if soup is None:
+        print("[scraper] Dječje kazalište: could not bypass protection on either page, returning []")
+        return []
+
+    events = []
+    today = datetime.now().date()
+
+    # The page contains the weekly timetable. We look for performance entries.
+    # Strategy: find blocks that contain time patterns (e.g. 10:00, 17:30) and a title/link for the play.
+    # Also capture surrounding date context if available (day names + dates).
+
+    day_pattern = re.compile(r"(ponedjeljak|utorak|srijeda|četvrtak|petak|subota|nedjelja)", re.I)
+    time_pattern = re.compile(r"(\d{1,2}[:.]\d{2})")
+
+    # Walk the page and group by day when possible
+    current_date = None
+
+    for elem in soup.find_all(["div", "section", "article", "li", "tr", "h2", "h3", "p"], limit=150):
+        text = elem.get_text(" ", strip=True)
+        if not text or len(text) < 8:
+            continue
+
+        # Update current date context if we see a day header
+        day_match = day_pattern.search(text)
+        if day_match:
+            # Try to extract full date too
+            date_from_text = _parse_croatian_date(text)
+            if date_from_text:
+                current_date = date_from_text
+            continue
+
+        # Look for time + performance title
+        time_match = time_pattern.search(text)
+        if not time_match:
+            continue
+
+        # Find a meaningful title - prefer links or longer descriptive text
+        title = None
+        link = elem.find("a", href=True)
+        if link:
+            title = link.get_text(strip=True)
+            href = link.get("href", "")
+            if not href.startswith("http"):
+                href = "https://www.djecje-kazaliste.hr" + href.lstrip("/")
+        else:
+            # Fallback: take a chunk that looks like a play title (avoid pure times)
+            parts = [p.strip() for p in text.split() if len(p.strip()) > 3]
+            if parts:
+                title = " ".join(parts[:6])  # reasonable length
+
+        if not title or len(title) < 5:
+            continue
+
+        # Skip if it looks like navigation or generic
+        if any(bad in title.lower() for bad in ["početna", "kontakt", "o nama", "repertoar", "raspored"]):
+            continue
+
+        event_date = current_date
+        if event_date and (event_date < today or (event_date - today).days > days_ahead):
+            continue
+
+        time_str = time_match.group(1).replace(".", ":")
+
+        events.append({
+            "title": f"{title} – Dječje kazalište Branka Mihaljevića",
+            "url": href if 'href' in locals() and href else (url if 'url' in locals() else "https://www.djecje-kazaliste.hr/"),
+            "date": event_date.isoformat() if event_date else None,
+            "source": "djecje-kazaliste.hr",
+            "has_reliable_date": event_date is not None,
+            "location": "Dječje kazalište Branka Mihaljevića",
+            "short_description": f"Predstava u {time_str}. {text[:120]}",
+        })
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for e in events:
+        key = (e["title"][:60], e.get("date"))
+        if key not in seen:
+            seen.add(key)
+            unique.append(e)
+
+    unique.sort(key=lambda x: (0 if x.get("has_reliable_date") else 1, x.get("date") or "9999-12-31"))
+
+    result = unique[:15]
 
     if use_cache:
         _set_cache(cache_key, result)
