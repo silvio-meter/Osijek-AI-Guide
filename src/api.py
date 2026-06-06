@@ -942,6 +942,7 @@ async def chat_stream(
         raise ValidationException(
             message=get_friendly_message("message_too_long"),
             details={"max_length": 4000, "current_length": len(message)}
+        )
 
     # === HARD BYPASS for Dječje kazalište schedule (same as non-stream) ===
     msg_lower = message.lower()
@@ -953,7 +954,7 @@ async def chat_stream(
         canned_stream = StreamingResponse(_canned_stream(), media_type="text/event-stream")
         _add_cors_headers_for_dev(canned_stream, request)
         return canned_stream
-        )
+
     if len(message.strip()) == 0:
         raise ValidationException(
             message=get_friendly_message("message_empty")
