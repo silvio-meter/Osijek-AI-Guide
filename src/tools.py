@@ -64,10 +64,17 @@ def _get_place_web_map() -> dict:
                 name = p.get("name", "").lower().strip()
                 if name:
                     web_map[name] = web
+                    # Index individual words from name for better fuzzy matching (e.g. "urania", "europa")
+                    for word in name.split():
+                        if len(word) > 3:
+                            web_map[word] = web
                 # Also index by id and some tags for better matching
                 pid = p.get("id", "").lower()
                 if pid:
                     web_map[pid] = web
+                    for word in pid.split("_"):
+                        if len(word) > 3:
+                            web_map[word] = web
                 for tag in p.get("tags", []) or []:
                     if tag and len(tag) > 3:
                         web_map[tag.lower()] = web
@@ -426,6 +433,18 @@ def search_osijek_events(query: str = "događaji", structured: bool = False) -> 
                     source_note = "lokalni scraperi"
 
                 return f"Pronađeni događaji ({source_note}):\n\n" + "\n\n".join(formatted)
+
+    # === Special case for venue-specific schedule queries (Dječje kazalište, Kino Urania, Europa, CineStar etc.) ===
+    # Always provide the official web link from osijek_places.json (the source of truth for venue websites).
+    # This solves the "ne radi" / "nemam podataka" issue when direct scraping is blocked by site protection
+    # or when no exact matches for "next 3 days" are in search results.
+    q_lower = query.lower()
+    is_venue_schedule_query = any(venue in q_lower for venue in ["dječje kazalište", "djecje kazalište", "kazalištu", "urania", "europa", "cinestar", "kino"]) and any(word in q_lower for word in ["raspored", "predstave", "filmovi", "program", "kino", "kazalište"])
+    if is_venue_schedule_query:
+        web_map = _get_place_web_map()
+        for key, web in web_map.items():
+            if key in q_lower and web:
+                return f"Trenutno nemam detaljan raspored za iduća 3 dana iz mojih izvora za ovo mjesto, ali službena stranica za program/raspored je {web}. Preporučujem da provjeriš tamo (često ima tjedni ili mjesečni raspored). Ako želiš plan za nešto drugo (npr. uz Dravu ili Baranju), reci!"
 
     # === 4. Fallback / Supplement: Tavily (with site restriction for places that have web) ===
     if not tavily_client:
