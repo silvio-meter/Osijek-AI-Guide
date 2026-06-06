@@ -48,15 +48,41 @@ def _get_place_web_map() -> dict:
     """Load places from the mobile map data (source of truth for rich places + web URLs).
     Returns lowercased name -> web URL for all places that have a website.
     This allows the AI to target specific venue websites for current programs, menus, opening hours etc.
+    Falls back gracefully if the file is not present (e.g. Railway backend deploy without mobile assets sibling).
     """
+    FALLBACK_WEB = {
+        "djecje_kazaliste_branka_mihaljevica": "https://www.djecje-kazaliste.hr/tjedni-raspored/",
+        "dječje kazalište branka mihaljevića": "https://www.djecje-kazaliste.hr/tjedni-raspored/",
+        "kino_urania": "https://kinematografi-osijek.hr/",
+        "kino urania": "https://kinematografi-osijek.hr/",
+        "kino_europa": "https://kinematografi-osijek.hr/tjedni-pregled/",
+        "kino europa": "https://kinematografi-osijek.hr/tjedni-pregled/",
+        "cinestar_osijek": "https://cinestarcinemas.hr/osijek-portanova-centar",
+        "cinestar": "https://cinestarcinemas.hr/osijek-portanova-centar",
+    }
     try:
-        # From src/tools.py -> Osijek-AI-Guide (parents[1]) -> sibling lega_mobile
+        # Try sibling path (local dev)
         base = Path(__file__).resolve().parents[1]
         places_path = base.parent / "lega_mobile" / "assets" / "osijek_places.json"
+        if not places_path.exists():
+            # Try common Railway /app paths or current dir
+            alt_paths = [
+                Path("/app/lega_mobile/assets/osijek_places.json"),
+                Path.cwd() / "lega_mobile" / "assets" / "osijek_places.json",
+                Path("/lega_mobile/assets/osijek_places.json"),
+            ]
+            for ap in alt_paths:
+                if ap.exists():
+                    places_path = ap
+                    break
+        if not places_path.exists():
+            print("[tools] osijek_places.json not found at expected paths, using fallback web map for critical venues")
+            return FALLBACK_WEB
+
         with open(places_path, encoding="utf-8") as f:
             places = json.load(f)
 
-        web_map = {}
+        web_map = FALLBACK_WEB.copy()  # start with fallback
         for p in places:
             web = p.get("web")
             if web and str(web).strip():
@@ -64,11 +90,9 @@ def _get_place_web_map() -> dict:
                 name = p.get("name", "").lower().strip()
                 if name:
                     web_map[name] = web
-                    # Index individual words from name for better fuzzy matching (e.g. "urania", "europa")
                     for word in name.split():
                         if len(word) > 3:
                             web_map[word] = web
-                # Also index by id and some tags for better matching
                 pid = p.get("id", "").lower()
                 if pid:
                     web_map[pid] = web
@@ -80,8 +104,8 @@ def _get_place_web_map() -> dict:
                         web_map[tag.lower()] = web
         return web_map
     except Exception as e:
-        print(f"[tools] Could not load osijek_places.json for web map: {e}")
-        return {}
+        print(f"[tools] Could not load osijek_places.json for web map: {e} - using fallback")
+        return FALLBACK_WEB
 
 
 def _get_site_restriction(query: str) -> str:
@@ -372,6 +396,35 @@ def search_osijek_events(query: str = "događaji", structured: bool = False) -> 
 
     This gives the best quality + coverage. Never answer "nemam podataka" for these without calling this tool first.
     """
+    # Fast path for venue-specific schedule queries (Dječje kazalište, kina etc.): return URL immediately.
+    # Avoids slow scraper timeouts (osijeknews, djecje verification) that cause chat/stream timeouts in the app.
+    q_lower = query.lower()
+    is_venue_schedule_query = any(venue in q_lower for venue in ["dječje kazalište", "djecje kazalište", "kazalištu", "urania", "europa", "cinestar", "kino"]) and any(word in q_lower for word in ["raspored", "predstave", "filmovi", "program", "kino", "kazalište"])
+    if is_venue_schedule_query:
+        web_map = _get_place_web_map()
+        matched_url = None
+        matched_name = None
+        for key, web in web_map.items():
+            if key in q_lower and web:
+                matched_url = web
+                matched_name = key
+                break
+        if not matched_url:
+            if "dječje kazalište" in q_lower or "djecje kazalište" in q_lower or "kazalištu" in q_lower:
+                matched_url = "https://www.djecje-kazaliste.hr/tjedni-raspored/"
+                matched_name = "Dječje kazalište Branka Mihaljevića"
+            elif "urania" in q_lower:
+                matched_url = "https://kinematografi-osijek.hr/"
+                matched_name = "Kino Urania"
+            elif "europa" in q_lower:
+                matched_url = "https://kinematografi-osijek.hr/tjedni-pregled/"
+                matched_name = "Kino Europa"
+            elif "cinestar" in q_lower:
+                matched_url = "https://cinestarcinemas.hr/osijek-portanova-centar"
+                matched_name = "CineStar Osijek"
+        if matched_url:
+            return f"Trenutno nemam detaljan raspored za iduća 3 dana iz mojih izvora za {matched_name or 'ovo mjesto'}, ali službena stranica za program/raspored je {matched_url}. Preporučujem da provjeriš tamo (često ima tjedni ili mjesečni raspored). Ako želiš plan za nešto drugo (npr. uz Dravu ili Baranju), reci!"
+
     # Use the shared hybrid logic (curated + scraped, no Tavily here)
     merged = []
     curated_count = 0
@@ -442,9 +495,29 @@ def search_osijek_events(query: str = "događaji", structured: bool = False) -> 
     is_venue_schedule_query = any(venue in q_lower for venue in ["dječje kazalište", "djecje kazalište", "kazalištu", "urania", "europa", "cinestar", "kino"]) and any(word in q_lower for word in ["raspored", "predstave", "filmovi", "program", "kino", "kazalište"])
     if is_venue_schedule_query:
         web_map = _get_place_web_map()
+        matched_url = None
+        matched_name = None
         for key, web in web_map.items():
             if key in q_lower and web:
-                return f"Trenutno nemam detaljan raspored za iduća 3 dana iz mojih izvora za ovo mjesto, ali službena stranica za program/raspored je {web}. Preporučujem da provjeriš tamo (često ima tjedni ili mjesečni raspored). Ako želiš plan za nešto drugo (npr. uz Dravu ili Baranju), reci!"
+                matched_url = web
+                matched_name = key
+                break
+        # Hardcoded fallbacks for critical venues (web_map load often fails in Railway because lega_mobile/assets not present in backend container)
+        if not matched_url:
+            if "dječje kazalište" in q_lower or "djecje kazalište" in q_lower or "kazalištu" in q_lower:
+                matched_url = "https://www.djecje-kazaliste.hr/tjedni-raspored/"
+                matched_name = "Dječje kazalište Branka Mihaljevića"
+            elif "urania" in q_lower:
+                matched_url = "https://kinematografi-osijek.hr/"
+                matched_name = "Kino Urania"
+            elif "europa" in q_lower:
+                matched_url = "https://kinematografi-osijek.hr/tjedni-pregled/"
+                matched_name = "Kino Europa"
+            elif "cinestar" in q_lower:
+                matched_url = "https://cinestarcinemas.hr/osijek-portanova-centar"
+                matched_name = "CineStar Osijek"
+        if matched_url:
+            return f"Trenutno nemam detaljan raspored za iduća 3 dana iz mojih izvora za {matched_name or 'ovo mjesto'}, ali službena stranica za program/raspored je {matched_url}. Preporučujem da provjeriš tamo (često ima tjedni ili mjesečni raspored). Ako želiš plan za nešto drugo (npr. uz Dravu ili Baranju), reci!"
 
     # === 4. Fallback / Supplement: Tavily (with site restriction for places that have web) ===
     if not tavily_client:
