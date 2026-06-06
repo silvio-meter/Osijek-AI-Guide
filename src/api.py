@@ -604,6 +604,23 @@ async def chat_with_lega(
 
     language = chat_request.language
 
+    # === HARD BYPASS for known problematic venue schedule query (Dječje kazalište) ===
+    # The site has strong anti-bot protection so scraper/Tavily can't reliably get the next 3 days schedule.
+    # Per user request: if not feasible to fetch live data, just show the official URL.
+    # This prevents long timeouts, LLM hallucinations of "nemam podataka", and client disconnects.
+    msg_lower = chat_request.message.lower()
+    if ("dječjem kazalištu" in msg_lower or "djecje kazalištu" in msg_lower or "dječje kazalište" in msg_lower) and ("raspored" in msg_lower or "predstave" in msg_lower):
+        canned = "E bracika, trenutno nemam detaljan raspored za iduća 3 dana iz mojih izvora za Dječje kazalište Branka Mihaljevića, ali službena stranica za program je https://www.djecje-kazaliste.hr/tjedni-raspored/ . Preporučujem da provjeriš tamo (često ima tjedni ili mjesečni raspored). Ako želiš plan za nešto drugo (npr. uz Dravu ili Baranju), reci!"
+        if stream:
+            async def _canned_stream():
+                yield f"data: {json.dumps({'content': canned})}\n\n"
+                yield "data: [DONE]\n\n"
+            canned_stream = StreamingResponse(_canned_stream(), media_type="text/event-stream")
+            _add_cors_headers_for_dev(canned_stream, request)
+            return canned_stream
+        else:
+            return {"content": canned}  # or proper response model, but for simplicity
+
     # Load + NORMALIZE using the new safe helper (big quality improvement)
     chat_history_messages = get_safe_history_for_llm(user_id, chat_request.max_history)
 
@@ -925,6 +942,17 @@ async def chat_stream(
         raise ValidationException(
             message=get_friendly_message("message_too_long"),
             details={"max_length": 4000, "current_length": len(message)}
+
+    # === HARD BYPASS for Dječje kazalište schedule (same as non-stream) ===
+    msg_lower = message.lower()
+    if ("dječjem kazalištu" in msg_lower or "djecje kazalištu" in msg_lower or "dječje kazalište" in msg_lower) and ("raspored" in msg_lower or "predstave" in msg_lower):
+        canned = "E bracika, trenutno nemam detaljan raspored za iduća 3 dana iz mojih izvora za Dječje kazalište Branka Mihaljevića, ali službena stranica za program je https://www.djecje-kazaliste.hr/tjedni-raspored/ . Preporučujem da provjeriš tamo (često ima tjedni ili mjesečni raspored). Ako želiš plan za nešto drugo (npr. uz Dravu ili Baranju), reci!"
+        async def _canned_stream():
+            yield f"data: {json.dumps({'content': canned})}\n\n"
+            yield "data: [DONE]\n\n"
+        canned_stream = StreamingResponse(_canned_stream(), media_type="text/event-stream")
+        _add_cors_headers_for_dev(canned_stream, request)
+        return canned_stream
         )
     if len(message.strip()) == 0:
         raise ValidationException(
