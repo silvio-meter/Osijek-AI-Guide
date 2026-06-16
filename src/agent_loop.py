@@ -8,7 +8,7 @@ import json
 import logging
 from typing import Any, AsyncGenerator, Callable
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent_prompts_v36 import get_agent_system_prompt
 from agent_registry import get_all_agent_tools, get_tool_execution, is_client_tool, is_server_tool
@@ -67,6 +67,14 @@ def build_agent_system_prompt(language: str, client_context: dict | None) -> str
         lines.append(f"- {key}: {value}")
     if len(lines) > 1:
         prompt += "\n\n" + "\n".join(lines)
+    prefetch = (client_context or {}).get("tool_results_prefetch")
+    if prefetch:
+        prompt += (
+            f"\n\n{prefetch}\n\n"
+            "**KRITIČNO (v3.6):** Gornji TOOL_RESULTS su pouzdani podaci iz app kataloga. "
+            "Svaka preporuka MORA imati konkretan razlog iz opisa (hrana, atmosfera, lokacija). "
+            "ZABRANJENO: 'Vrijedi posjetiti', 'Lijepo mjesto' bez objašnjenja."
+        )
     return prompt
 
 
@@ -166,9 +174,8 @@ def iterate_agent_events(
     ai_response = llm_with_tools.invoke(messages)
 
     if not getattr(ai_response, "tool_calls", None):
-        content = getattr(ai_response, "content", "") or ""
-        out = messages + [ai_response]
-        yield {"type": "done_messages", "messages": out, "final_text": content}
+        # Always let plain_llm stream the final answer (avoids weak draft + generic lists).
+        yield {"type": "done_messages", "messages": list(messages), "final_text": ""}
         return
 
     normalized = [_normalize_tool_call(tc) for tc in ai_response.tool_calls]
@@ -240,9 +247,22 @@ def format_tool_results_block(messages: list[BaseMessage]) -> str | None:
     )
 
 
+def _extract_prefetch_from_messages(messages: list[BaseMessage]) -> str | None:
+    for m in messages:
+        if isinstance(m, SystemMessage):
+            content = (getattr(m, "content", "") or "")
+            marker = "TOOL_RESULTS ("
+            idx = content.find(marker)
+            if idx >= 0:
+                return content[idx:].split("\n\n**KRITIČNO")[0].strip()
+    return None
+
+
 def prepare_final_generation_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     """Inject structured TOOL_RESULTS reminder before streaming the final answer."""
     block = format_tool_results_block(messages)
+    if not block:
+        block = _extract_prefetch_from_messages(messages)
     if not block:
         return messages
     reminder = (
