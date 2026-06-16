@@ -1,0 +1,124 @@
+{
+  "events": [
+    {
+      "id": "evt_001",
+      "title": "Koncert Hladno pivo u Tvrđi",
+      "date": "2026-06-20",
+      "time": "20:00",
+      "location": "Tvrđa, Osijek",
+      "category": "concert",
+      "short_description": "Hladno pivo svira u Tvrđi uz podršku lokalnih bendova.",
+      "admission": "plaćeno"
+    },
+    {
+      "id": "evt_002",
+      "title": "Izložba slavonskih motiva — Muzej Slavonije",
+      "date": "2026-06-16",
+      "time": "10:00",
+      "location": "Muzej Slavonije, Osijek",
+      "category": "exhibition",
+      "short_description": "Privremena izložba slavonske umjetnosti i baštine.",
+      "admission": "plaćeno"
+    },
+    {
+      "id": "evt_003",
+      "title": "Večernja projekcija — Kino Urania",
+      "date": "2026-06-17",
+      "time": "19:30",
+      "location": "Kino Urania, Europska avenija",
+      "category": "other",
+      "short_description": "Aktualni film u programu Kinematografa Osijek.",
+      "admission": "plaćeno"
+    },
+    {
+      "id": "evt_004",
+      "title": "NK Osijek — domaća utakmica",
+      "date": "2026-06-18",
+      "time": "18:00",
+      "location": "Stadion Gradski vrt, Osijek",
+      "category": "sport",
+      "short_description": "Domaća utakmica u prvenstvu — provjeri službeni raspored.",
+      "admission": "plaćeno"
+    },
+    {
+      "id": "evt_005",
+      "title": "Ulični festival hrane — Tvrđa",
+      "date": "2026-06-19",
+      "time": "17:00",
+      "location": "Tvrđa, Osijek",
+      "category": "festival",
+      "short_description": "Lokalni proizvođači, gastro štandovi i glazba u baroknom jezgru.",
+      "admission": "besplatno"
+    },
+    {
+      "id": "evt_006",
+      "title": "Predstava za djecu — Dječje kazalište",
+      "date": "2026-06-16",
+      "time": "11:00",
+      "location": "Dječje kazalište Branka Mihaljevića, Osijek",
+      "category": "other",
+      "short_description": "Jutarnja predstava za najmlađe — provjeri tjedni raspored.",
+      "admission": "plaćeno"
+    },
+    {
+      "id": "evt_007",
+      "title": "Jazz večer na Dravi",
+      "date": "2026-06-17",
+      "time": "21:00",
+      "location": "Obala Drave, Osijek",
+      "category": "concert",
+      "short_description": "Lokalni jazz sastav uz rijeku — opuštena ljetna atmosfera.",
+      "admission": "besplatno"
+    },
+    {
+      "id": "evt_008",
+      "title": "Šetnja i radionica u Tvrđi",
+      "date": "2026-06-18",
+      "time": "18:30",
+      "location": "Tvrđa, Osijek",
+      "category": "exhibition",
+      "short_description": "Vođena šetnja i kratka radionica o povijesti Tvrđe.",
+      "admission": "plaćeno"
+    },
+    {
+      "id": "evt_009",
+      "title": "Ljetni koncert u Europskom parku",
+      "date": "2026-06-19",
+      "time": "20:30",
+      "location": "Europski park, Osijek",
+      "category": "concert",
+      "short_description": "Besplatan koncert pod šatorom — lokalni izvođači.",
+      "admission": "besplatno"
+    },
+    {
+      "id": "evt_010",
+      "title": "Kino Europa — tjedni program",
+      "date": "2026-06-20",
+      "time": "20:00",
+      "location": "Kino Europa, Trg Slobode",
+      "category": "other",
+      "short_description": "Art i mainstream filmovi u tjednom programu.",
+      "admission": "plaćeno"
+    },
+    {
+      "id": "evt_011",
+      "title": "Osijek Summer Fest — dan 1",
+      "date": "2026-06-16",
+      "time": "19:00",
+      "location": "Centar grada, Osijek",
+      "category": "festival",
+      "short_description": "Ljetni festival s koncertima, hranom i aktivnostima u centru.",
+      "admission": "besplatno"
+    },
+    {
+      "id": "evt_012",
+      "title": "Noćni trčanje Srednjikom",
+      "date": "2026-06-18",
+      "time": "21:00",
+      "location": "Park Srednjika, Osijek",
+      "category": "sport",
+      "short_description": "Organizirano noćno trčanje za rekreativce.",
+      "admission": "besplatno"
+    }
+  ]
+}

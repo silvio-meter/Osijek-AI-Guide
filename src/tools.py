@@ -663,8 +663,12 @@ def search_restaurants_or_food(query: str = "restorani", structured: bool = Fals
 
 def get_all_tools():
     """Returns all tools available to Lega for live information."""
+    from chat_data_tools import get_events_today, get_wine_recommendations
+
     return [
         get_current_weather_osijek,
         search_osijek_events,
+        get_events_today,
+        get_wine_recommendations,
         search_restaurants_or_food,
     ]

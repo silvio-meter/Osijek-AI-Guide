@@ -20,7 +20,11 @@ MAX_AGENT_ITERATIONS = 5
 
 AGENT_TOOL_INSTRUCTIONS = """
 **Alati (function calling):**
-- vrijeme → get_current_weather_osijek | događaji/kino → search_osijek_events | restorani (web) → search_restaurants_or_food
+- vrijeme → get_current_weather_osijek
+- događaji danas / ovaj tjedan → get_events_today (prvo za "danas", "večeras", "ovaj tjedan")
+- šira pretraga događaja / kino / kazalište → search_osijek_events
+- vino / vinarije Baranja → get_wine_recommendations
+- restorani (web) → search_restaurants_or_food
 - mjesta iz appa → search_places, get_place_details | blizu mene → get_nearby_places
 - preporuke → get_recommended_places | plan → get_user_active_plan
 Uvijek pozovi relevantni alat prije nego izmišljaš činjenice. Rezultate alata MORAŠ koristiti u finalnom odgovoru.

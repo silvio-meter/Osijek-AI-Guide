@@ -1,0 +1,84 @@
+{
+  "recommendations": [
+    {
+      "winery": "Vinarija Josić",
+      "wine_name": "Cuvée Josić",
+      "type": "crveno",
+      "price_range": "medium",
+      "food_pairing": ["meso", "sir"],
+      "description": "Bogato crveno vino s notama višnje i začina. Odlično uz meso."
+    },
+    {
+      "winery": "Vinarija Krauthaker",
+      "wine_name": "Graševina Mitrovac",
+      "type": "bijelo",
+      "price_range": "medium",
+      "food_pairing": ["riba", "sir"],
+      "description": "Klasična baranjska graševina — svježa, mineralna, idealna uz ribu i lagana jela."
+    },
+    {
+      "winery": "Belje",
+      "wine_name": "Frankovka Baranja",
+      "type": "crveno",
+      "price_range": "low",
+      "food_pairing": ["meso"],
+      "description": "Domaća frankovka s mekim taninima — dobar izbor uz roštilj i čobanac."
+    },
+    {
+      "winery": "Vinarija Erdutski vinogradi",
+      "wine_name": "Traminac Premium",
+      "type": "bijelo",
+      "price_range": "high",
+      "food_pairing": ["riba", "desert"],
+      "description": "Aromatičan traminac s notama ruže i citrusa — uz fine ribe ili kao aperitiv."
+    },
+    {
+      "winery": "Vinarija Zlatno brdo",
+      "wine_name": "Rose Baranja",
+      "type": "rose",
+      "price_range": "medium",
+      "food_pairing": ["sir", "riba"],
+      "description": "Lagano rose za ljetne večeri — osvježavajuće uz salate i laganu hranu."
+    },
+    {
+      "winery": "Vinarija Josić",
+      "wine_name": "Prošek Josić",
+      "type": "slatko",
+      "price_range": "high",
+      "food_pairing": ["desert", "sir"],
+      "description": "Tradicionalni prošek — slatko vino za desert ili uz pleskavice od pačjeg ili gusjeg foie grasa."
+    },
+    {
+      "winery": "Vinarija Kutjevo (Baranja)",
+      "wine_name": "Pinot Crni",
+      "type": "crveno",
+      "price_range": "medium",
+      "food_pairing": ["meso", "sir"],
+      "description": "Elegantno crveno s notama trešnje — dobro uz pečeno meso i zrele sireve."
+    },
+    {
+      "winery": "Vinarija Erdutski vinogradi",
+      "wine_name": "Rajnski Rizling",
+      "type": "bijelo",
+      "price_range": "medium",
+      "food_pairing": ["riba", "meso"],
+      "description": "Suho bijelo s dobrim balansom kiselosti — svestrano uz ribu i bijelo meso."
+    },
+    {
+      "winery": "OPG Vinogradi Baranje",
+      "wine_name": "Cabernet Sauvignon",
+      "type": "crveno",
+      "price_range": "low",
+      "food_pairing": ["meso"],
+      "description": "Pristupačno crveno za svakodnevnu večeru — uz slavonske mesne specijalitete."
+    },
+    {
+      "winery": "Vinarija Zlatno brdo",
+      "wine_name": "Graševina Classic",
+      "type": "bijelo",
+      "price_range": "low",
+      "food_pairing": ["riba", "sir"],
+      "description": "Svakodnevna graševina iz Baranje — lagana i pitka uz ribu s Drave."
+    }
+  ]
+}
