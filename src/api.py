@@ -104,7 +104,7 @@ from agent_registry import get_all_agent_tools
 from agent_sessions import agent_session_store
 from agent_loop import (
     build_agent_system_prompt,
-    run_agent_iteration,
+    iterate_agent_events,
     apply_client_tool_results,
     stream_final_answer,
     sse_agent_event,
@@ -1353,53 +1353,58 @@ async def _agent_sse_generator(
     logger = logging.getLogger("lega.api")
     server_tools = _agent_server_tools_map()
 
+    result_messages = messages
     try:
-        result = run_agent_iteration(
+        for event in iterate_agent_events(
             llm_with_tools=llm_agent,
             messages=messages,
             server_tools=server_tools,
             iteration=start_iteration,
-        )
+        ):
+            kind = event.get("type")
+            if kind == "agent_status":
+                yield sse_agent_event(event)
+                continue
+            if kind == "tool_call":
+                tool_name = event.get("name", "")
+                try:
+                    tool_usage_tracker.record_tool_use(user_id, tool_name)
+                except Exception:
+                    pass
+                yield sse_agent_event(event)
+                continue
+            if kind == "tool_request_client":
+                yield sse_agent_event(event)
+                continue
+            if kind == "awaiting_client":
+                result_messages = event["messages"]
+                pending = event.get("pending_client") or []
+                session = agent_session_store.create(
+                    user_id=user_id,
+                    messages=result_messages,
+                    language=language,
+                    user_message=user_message,
+                )
+                if existing_session_id:
+                    agent_session_store.delete(existing_session_id)
+                yield sse_agent_event({
+                    "type": "awaiting_client",
+                    "session_id": session.session_id,
+                    "pending_count": len(pending),
+                })
+                return
+            if kind == "done_messages":
+                result_messages = event["messages"]
+                break
     except Exception:
         logger.exception("[CHAT][AGENT] Agent iteration failed | user=%s", user_id)
         yield sse_error("internal_server_error", get_friendly_message("llm_error"))
         return
 
-    for tool_name in result.tools_used:
-        try:
-            tool_usage_tracker.record_tool_use(user_id, tool_name)
-        except Exception:
-            pass
-        yield sse_agent_event({"type": "tool_call", "name": tool_name, "execution": "server"})
-
-    if result.pending_client:
-        for tc in result.pending_client:
-            yield sse_agent_event({
-                "type": "tool_request_client",
-                "tool_call_id": tc["id"],
-                "name": tc["name"],
-                "args": tc.get("args") or {},
-            })
-
-        session = agent_session_store.create(
-            user_id=user_id,
-            messages=result.messages,
-            language=language,
-            user_message=user_message,
-        )
-        if existing_session_id:
-            agent_session_store.delete(existing_session_id)
-        yield sse_agent_event({
-            "type": "awaiting_client",
-            "session_id": session.session_id,
-            "pending_count": len(result.pending_client),
-        })
-        return
-
-    if result.done:
+    if result_messages:
         try:
             accumulated = ""
-            async for chunk in stream_final_answer(plain_llm, result.messages):
+            async for chunk in stream_final_answer(plain_llm, result_messages):
                 if chunk.startswith("data: ") and "[DONE]" not in chunk:
                     try:
                         payload = json.loads(chunk[6:].strip())

@@ -99,17 +99,80 @@ def run_agent_iteration(
     server_tools: dict,
     iteration: int,
 ) -> AgentLoopResult:
-    """One LLM hop + tool execution. May pause for client tools."""
+    """Blocking single-pass iteration (legacy). Prefer iterate_agent_events for SSE UX."""
+    result_messages = messages
+    tools_used: list[str] = []
+    pending_client: list[dict] = []
+    done = False
+    final_text = ""
+
+    for event in iterate_agent_events(
+        llm_with_tools=llm_with_tools,
+        messages=messages,
+        server_tools=server_tools,
+        iteration=iteration,
+    ):
+        kind = event.get("type")
+        if kind == "agent_status":
+            continue
+        if kind == "tool_call":
+            tools_used.append(event.get("name", ""))
+        elif kind == "tool_request_client":
+            pending_client.append(
+                {
+                    "id": event.get("tool_call_id", ""),
+                    "name": event.get("name", ""),
+                    "args": event.get("args") or {},
+                }
+            )
+        elif kind == "awaiting_client":
+            result_messages = event["messages"]
+            break
+        elif kind == "done_messages":
+            result_messages = event["messages"]
+            done = True
+            final_text = event.get("final_text", "")
+            break
+
+    if pending_client:
+        return AgentLoopResult(
+            messages=result_messages,
+            done=False,
+            pending_client=pending_client,
+            tools_used=tools_used,
+        )
+    return AgentLoopResult(
+        messages=result_messages,
+        done=done,
+        tools_used=tools_used,
+        final_text=final_text,
+    )
+
+
+def iterate_agent_events(
+    *,
+    llm_with_tools,
+    messages: list[BaseMessage],
+    server_tools: dict,
+    iteration: int,
+):
+    """
+    Yield progressive agent events so the client can show tool status BEFORE work runs.
+    Event dicts: agent_status, tool_call, tool_request_client, awaiting_client, done_messages.
+    """
     if iteration >= MAX_AGENT_ITERATIONS:
-        return AgentLoopResult(messages=messages, done=True, final_text="")
+        yield {"type": "done_messages", "messages": messages, "final_text": ""}
+        return
+
+    yield {"type": "agent_status", "phase": "thinking", "message": "Lega analizira upit…"}
 
     ai_response = llm_with_tools.invoke(messages)
-    tools_used: list[str] = []
 
     if not getattr(ai_response, "tool_calls", None):
         content = getattr(ai_response, "content", "") or ""
         out = messages + [ai_response]
-        return AgentLoopResult(messages=out, done=True, final_text=content, tools_used=tools_used)
+        yield {"type": "done_messages", "messages": out, "final_text": content}
+        return
 
     normalized = [_normalize_tool_call(tc) for tc in ai_response.tool_calls]
     client_pending = [tc for tc in normalized if is_client_tool(tc["name"])]
@@ -119,7 +182,12 @@ def run_agent_iteration(
     out_messages = messages + [ai_response]
 
     for tc in server_calls:
-        tools_used.append(tc["name"])
+        yield {
+            "type": "tool_call",
+            "name": tc["name"],
+            "execution": "server",
+            "args": tc.get("args") or {},
+        }
         result = _execute_server_tool(tc["name"], tc["args"], server_tools)
         out_messages.append(
             ToolMessage(content=result, tool_call_id=tc["id"], name=tc["name"])
@@ -135,15 +203,21 @@ def run_agent_iteration(
         )
 
     if client_pending:
-        return AgentLoopResult(
-            messages=out_messages,
-            done=False,
-            pending_client=client_pending,
-            tools_used=tools_used,
-        )
+        for tc in client_pending:
+            yield {
+                "type": "tool_request_client",
+                "tool_call_id": tc["id"],
+                "name": tc["name"],
+                "args": tc.get("args") or {},
+            }
+        yield {
+            "type": "awaiting_client",
+            "messages": out_messages,
+            "pending_client": client_pending,
+        }
+        return
 
-    # Only server tools this round — recurse (another LLM call with tool results)
-    return run_agent_iteration(
+    yield from iterate_agent_events(
         llm_with_tools=llm_with_tools,
         messages=out_messages,
         server_tools=server_tools,
