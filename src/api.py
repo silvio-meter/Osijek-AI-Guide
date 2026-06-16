@@ -14,6 +14,8 @@ Authentication:
 Chat (requires JWT):
 - POST /chat
 - POST /chat/stream
+- POST /chat/agent          (Phase 3 — multi-turn agent, JSON body + SSE)
+- POST /chat/agent/continue (Phase 3 — resume after client tool execution)
 - POST /chat/reset
 - GET  /chat/history/{user_id}
 - GET  /chat/history/{user_id}/summary   (LLM-generated)
@@ -96,6 +98,18 @@ from user_context import (
 )
 from tool_usage import tool_usage_tracker
 from feedback import feedback_manager
+
+# Phase 3 — multi-turn agent (hybrid server + client tools)
+from agent_registry import get_all_agent_tools
+from agent_sessions import agent_session_store
+from agent_loop import (
+    build_agent_system_prompt,
+    run_agent_iteration,
+    apply_client_tool_results,
+    stream_final_answer,
+    sse_agent_event,
+    MAX_AGENT_ITERATIONS,
+)
 
 # Authentication
 from routers.auth import router as auth_router
@@ -414,6 +428,14 @@ plain_llm = ChatXAI(
     xai_api_key=os.getenv("XAI_API_KEY")
 )
 
+# Phase 3: server + client tool schemas (client tools pause for mobile execution)
+llm_agent = ChatXAI(
+    model="grok-3-mini",
+    temperature=0.7,
+    max_tokens=900,
+    xai_api_key=os.getenv("XAI_API_KEY")
+).bind_tools(get_all_agent_tools())
+
 
 def invoke_llm_with_retry(
     chain_or_llm,
@@ -475,6 +497,28 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     tools_used: List[str] = []
+
+
+class AgentChatRequest(BaseModel):
+    """Phase 3 agent chat — short user message + optional app context (JSON body)."""
+    message: str = Field(..., min_length=1, max_length=4000)
+    language: str = Field("hr-osijek", description="hr-osijek / hr-knjizevni / hr / en / de")
+    max_history: Optional[int] = Field(20, ge=1, le=50)
+    client_context: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Lightweight app context: interests, location, active_plan, recent_visits, etc.",
+    )
+
+
+class ClientToolResult(BaseModel):
+    tool_call_id: str
+    name: str
+    content: str
+
+
+class AgentContinueRequest(BaseModel):
+    session_id: str
+    tool_results: List[ClientToolResult] = Field(default_factory=list)
 
 class PreferenceUpdate(BaseModel):
     interests: Optional[List[str]] = None
@@ -1262,6 +1306,213 @@ async def chat_stream(
                 yield sse_error("internal_server_error", get_friendly_message("internal_server_error"))
 
         return StreamingResponse(stream_direct(), media_type="text/event-stream")
+
+
+# =============================================
+# Phase 3: Multi-turn Agent Chat (hybrid tools)
+# =============================================
+
+def _agent_server_tools_map() -> dict:
+    return {t.name: t for t in get_all_tools()}
+
+
+def _build_agent_messages(
+    *,
+    user_id: str,
+    message: str,
+    language: str,
+    max_history: Optional[int],
+    client_context: Optional[Dict[str, Any]],
+) -> list:
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    chat_history_messages = get_safe_history_for_llm(user_id, max_history)
+    user_context_str = get_user_context_for_prompt(user_id)
+    system_prompt = get_system_prompt(language)
+    if user_context_str and "Korisnik još nema spremljene osobne preferencije" not in user_context_str:
+        system_prompt += f"\n\n**Korisničke preferencije (backend):**\n{user_context_str}"
+    system_prompt = build_agent_system_prompt(system_prompt, client_context)
+
+    return [
+        SystemMessage(content=system_prompt),
+        *chat_history_messages,
+        HumanMessage(content=message),
+    ]
+
+
+async def _agent_sse_generator(
+    *,
+    user_id: str,
+    user_message: str,
+    messages: list,
+    language: str,
+    start_iteration: int = 0,
+    existing_session_id: Optional[str] = None,
+) -> AsyncGenerator[str, None]:
+    """Run agent loop; stream content or pause for client tools."""
+    logger = logging.getLogger("lega.api")
+    server_tools = _agent_server_tools_map()
+
+    try:
+        result = run_agent_iteration(
+            llm_with_tools=llm_agent,
+            messages=messages,
+            server_tools=server_tools,
+            iteration=start_iteration,
+        )
+    except Exception:
+        logger.exception("[CHAT][AGENT] Agent iteration failed | user=%s", user_id)
+        yield sse_error("internal_server_error", get_friendly_message("llm_error"))
+        return
+
+    for tool_name in result.tools_used:
+        try:
+            tool_usage_tracker.record_tool_use(user_id, tool_name)
+        except Exception:
+            pass
+        yield sse_agent_event({"type": "tool_call", "name": tool_name, "execution": "server"})
+
+    if result.pending_client:
+        for tc in result.pending_client:
+            yield sse_agent_event({
+                "type": "tool_request_client",
+                "tool_call_id": tc["id"],
+                "name": tc["name"],
+                "args": tc.get("args") or {},
+            })
+
+        session = agent_session_store.create(
+            user_id=user_id,
+            messages=result.messages,
+            language=language,
+            user_message=user_message,
+        )
+        if existing_session_id:
+            agent_session_store.delete(existing_session_id)
+        yield sse_agent_event({
+            "type": "awaiting_client",
+            "session_id": session.session_id,
+            "pending_count": len(result.pending_client),
+        })
+        return
+
+    if result.done:
+        try:
+            accumulated = ""
+            async for chunk in stream_final_answer(plain_llm, result.messages):
+                if chunk.startswith("data: ") and "[DONE]" not in chunk:
+                    try:
+                        payload = json.loads(chunk[6:].strip())
+                        if payload.get("type") == "content":
+                            accumulated += payload.get("content", "")
+                        elif payload.get("type") == "done":
+                            accumulated = payload.get("full_content", accumulated)
+                    except json.JSONDecodeError:
+                        pass
+                yield chunk
+
+            try:
+                chat_history_manager.add_full_turn(
+                    user_id=user_id,
+                    user_message=user_message,
+                    final_ai_message=accumulated,
+                )
+            except Exception:
+                logger.exception("[CHAT][AGENT] History save failed | user=%s", user_id)
+        except Exception:
+            logger.exception("[CHAT][AGENT] Final stream failed | user=%s", user_id)
+            yield sse_error("internal_server_error", get_friendly_message("internal_server_error"))
+
+
+@app.post(
+    "/chat/agent",
+    tags=["Chat"],
+    summary="Phase 3 multi-turn agent chat (SSE)",
+    description="JSON body + hybrid tool loop. Emits tool_call, tool_request_client, content, done, awaiting_client.",
+)
+@conditional_limit(CHAT_RATE_LIMIT)
+async def chat_agent(
+    request: Request,
+    body: AgentChatRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    user_id = str(current_user.id)
+    logger = logging.getLogger("lega.api")
+    logger.info("[CHAT][AGENT] Start | user=%s | msg_preview=%s", user_id, body.message[:80])
+
+    messages = _build_agent_messages(
+        user_id=user_id,
+        message=body.message,
+        language=body.language,
+        max_history=body.max_history,
+        client_context=body.client_context,
+    )
+
+    async def _stream():
+        async for event in _agent_sse_generator(
+            user_id=user_id,
+            user_message=body.message,
+            messages=messages,
+            language=body.language,
+        ):
+            yield event
+
+    resp = StreamingResponse(_stream(), media_type="text/event-stream")
+    _add_cors_headers_for_dev(resp, request)
+    return resp
+
+
+@app.post(
+    "/chat/agent/continue",
+    tags=["Chat"],
+    summary="Resume Phase 3 agent after client tool results",
+)
+@conditional_limit(CHAT_RATE_LIMIT)
+async def chat_agent_continue(
+    request: Request,
+    body: AgentContinueRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    user_id = str(current_user.id)
+    session = agent_session_store.get(body.session_id, user_id)
+    if session is None:
+        raise NotFoundException(message="Agent sesija istekla ili ne postoji. Pošalji novu poruku.")
+
+    updated_messages = apply_client_tool_results(
+        session.messages,
+        [tr.model_dump() for tr in body.tool_results],
+    )
+    session.messages = updated_messages
+    session.iteration += 1
+
+    user_message = session.user_message or "(continue)"
+
+    async def _stream():
+        async for event in _agent_sse_generator(
+            user_id=user_id,
+            user_message=user_message,
+            messages=updated_messages,
+            language=session.language,
+            start_iteration=session.iteration,
+            existing_session_id=body.session_id,
+        ):
+            yield event
+        agent_session_store.delete(body.session_id)
+
+    resp = StreamingResponse(_stream(), media_type="text/event-stream")
+    _add_cors_headers_for_dev(resp, request)
+    return resp
+
+
+@app.get(
+    "/chat/agent/tools",
+    tags=["Chat"],
+    summary="List Phase 3 agent tool registry",
+)
+def chat_agent_tools_registry():
+    from agent_registry import get_tool_registry_metadata
+    return {"tools": get_tool_registry_metadata(), "max_iterations": MAX_AGENT_ITERATIONS}
+
 
 @app.get(
     "/restaurants",
