@@ -108,6 +108,7 @@ from agent_loop import (
     apply_client_tool_results,
     stream_final_answer,
     sse_agent_event,
+    extract_tool_history_payload,
     MAX_AGENT_ITERATIONS,
 )
 
@@ -1328,10 +1329,9 @@ def _build_agent_messages(
 
     chat_history_messages = get_safe_history_for_llm(user_id, max_history)
     user_context_str = get_user_context_for_prompt(user_id)
-    system_prompt = get_system_prompt(language)
+    system_prompt = build_agent_system_prompt(language, client_context)
     if user_context_str and "Korisnik još nema spremljene osobne preferencije" not in user_context_str:
         system_prompt += f"\n\n**Korisničke preferencije (backend):**\n{user_context_str}"
-    system_prompt = build_agent_system_prompt(system_prompt, client_context)
 
     return [
         SystemMessage(content=system_prompt),
@@ -1417,9 +1417,12 @@ async def _agent_sse_generator(
                 yield chunk
 
             try:
+                ai_tool_msg, tool_msgs = extract_tool_history_payload(result_messages)
                 chat_history_manager.add_full_turn(
                     user_id=user_id,
                     user_message=user_message,
+                    ai_tool_call_message=ai_tool_msg,
+                    tool_messages=tool_msgs or None,
                     final_ai_message=accumulated,
                 )
             except Exception:

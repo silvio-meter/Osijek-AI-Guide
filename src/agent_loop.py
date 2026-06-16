@@ -10,6 +10,7 @@ from typing import Any, AsyncGenerator, Callable
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
+from agent_prompts_v36 import get_agent_system_prompt
 from agent_registry import get_all_agent_tools, get_tool_execution, is_client_tool, is_server_tool
 from agent_sessions import AgentSession, agent_session_store
 
@@ -18,15 +19,11 @@ logger = logging.getLogger("lega.agent")
 MAX_AGENT_ITERATIONS = 5
 
 AGENT_TOOL_INSTRUCTIONS = """
-**Faza 3 — alati (function calling):**
-- Za **vrijeme** → get_current_weather_osijek (server)
-- Za **događaje, kino, raspored** → search_osijek_events (server)
-- Za **restorane / hranu (web)** → search_restaurants_or_food (server)
-- Za **mjesta iz app kataloga** → search_places, get_place_details (client — app će izvršiti)
-- Za **blizu mene** → get_nearby_places (client)
-- Za **personalizirane preporuke** → get_recommended_places (client)
-- Za **aktivni plan** → get_user_active_plan (client)
-Koristi alate prije nego izmišljaš činjenice. Možeš pozvati više alata u nizu.
+**Alati (function calling):**
+- vrijeme → get_current_weather_osijek | događaji/kino → search_osijek_events | restorani (web) → search_restaurants_or_food
+- mjesta iz appa → search_places, get_place_details | blizu mene → get_nearby_places
+- preporuke → get_recommended_places | plan → get_user_active_plan
+Uvijek pozovi relevantni alat prije nego izmišljaš činjenice. Rezultate alata MORAŠ koristiti u finalnom odgovoru.
 """
 
 
@@ -59,8 +56,8 @@ def _execute_server_tool(tool_name: str, tool_args: dict, server_tools: dict) ->
         return f"Greška pri izvršavanju {tool_name}: {e}"
 
 
-def build_agent_system_prompt(base_system: str, client_context: dict | None) -> str:
-    prompt = base_system + "\n\n" + AGENT_TOOL_INSTRUCTIONS
+def build_agent_system_prompt(language: str, client_context: dict | None) -> str:
+    prompt = get_agent_system_prompt(language) + "\n\n" + AGENT_TOOL_INSTRUCTIONS
     if not client_context:
         return prompt
     lines = ["**Kontekst iz mobilne aplikacije (pouzdano):**"]
@@ -225,6 +222,65 @@ def iterate_agent_events(
     )
 
 
+def format_tool_results_block(messages: list[BaseMessage]) -> str | None:
+    """Structured TOOL_RESULTS text for the final LLM hop (v3.6)."""
+    lines: list[str] = []
+    for m in messages:
+        if isinstance(m, ToolMessage):
+            name = getattr(m, "name", "") or "tool"
+            content = (getattr(m, "content", "") or "").strip()
+            if len(content) > 1200:
+                content = content[:1197] + "..."
+            lines.append(f"- alat: {name}\n  rezultat: {content}")
+    if not lines:
+        return None
+    return (
+        "TOOL_RESULTS (pouzdani podaci — OBAVEZNO koristi u odgovoru, zadrži osječki/topao ton):\n"
+        + "\n".join(lines)
+    )
+
+
+def prepare_final_generation_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Inject structured TOOL_RESULTS reminder before streaming the final answer."""
+    block = format_tool_results_block(messages)
+    if not block:
+        return messages
+    reminder = (
+        f"{block}\n\n"
+        "Uputa: Odgovori koristeći gornje TOOL_RESULTS. Svaka preporuka = konkretan razlog. "
+        "Bez 'Vrijedi posjetiti'. Završi pitanjem."
+    )
+    return list(messages) + [HumanMessage(content=reminder)]
+
+
+def extract_tool_history_payload(messages: list[BaseMessage]) -> tuple[dict | None, list[dict]]:
+    """Serialize latest tool turn for chat history (multi-turn memory)."""
+    ai_tool: dict | None = None
+    tool_rows: list[dict] = []
+    for m in messages:
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+            tc_raw = m.tool_calls
+            tc_list = []
+            for tc in tc_raw or []:
+                if isinstance(tc, dict):
+                    tc_list.append(tc)
+                else:
+                    tc_list.append({
+                        "id": getattr(tc, "id", ""),
+                        "name": getattr(tc, "name", ""),
+                        "args": getattr(tc, "args", {}) or {},
+                    })
+            ai_tool = {"role": "assistant", "content": m.content or "", "tool_calls": tc_list}
+        if isinstance(m, ToolMessage):
+            tool_rows.append({
+                "role": "tool",
+                "content": m.content,
+                "tool_call_id": getattr(m, "tool_call_id", ""),
+                "name": getattr(m, "name", ""),
+            })
+    return ai_tool, tool_rows
+
+
 def apply_client_tool_results(
     messages: list[BaseMessage],
     tool_results: list[dict],
@@ -243,7 +299,8 @@ def apply_client_tool_results(
 
 async def stream_final_answer(plain_llm, messages: list[BaseMessage]) -> AsyncGenerator[str, None]:
     accumulated = ""
-    async for chunk in plain_llm.astream(messages):
+    final_input = prepare_final_generation_messages(messages)
+    async for chunk in plain_llm.astream(final_input):
         if chunk.content:
             accumulated += chunk.content
             yield sse_agent_event({"type": "content", "content": chunk.content})
