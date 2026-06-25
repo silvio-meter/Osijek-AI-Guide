@@ -74,9 +74,10 @@ def fetch_firestore_events(
     max_date = (date.today() + timedelta(days=days_ahead)).isoformat()
 
     try:
+        # Samo single-field filter (izbjegava composite index koji još ne postoji)
+        # is_active provjera se radi u Pythonu ispod
         docs = (
             db.collection("events")
-            .where(filter=FieldFilter("is_active", "==", True))
             .where(filter=FieldFilter("end_date", ">=", today))
             .limit(limit)
             .stream()
@@ -89,6 +90,8 @@ def fetch_firestore_events(
     for doc in docs:
         try:
             data = doc.to_dict()
+            if not data.get("is_active", True):
+                continue
             start = data.get("start_date") or ""
             # Isključi evente koji počinju previše daleko u budućnosti
             if start and start > max_date:
