@@ -33,6 +33,94 @@ from models.event import Event
 
 load_dotenv()
 
+# ── Firestore client (lazy singleton) ─────────────────────────────────────────
+_firestore_db = None
+
+def _get_firestore_db():
+    global _firestore_db
+    if _firestore_db is not None:
+        return _firestore_db
+    try:
+        import json as _json
+        import firebase_admin
+        from firebase_admin import credentials as _creds, firestore as _fs
+        if not firebase_admin._apps:
+            sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+            if not sa_json:
+                raise EnvironmentError("FIREBASE_SERVICE_ACCOUNT_JSON not set")
+            firebase_admin.initialize_app(_creds.Certificate(_json.loads(sa_json)))
+        _firestore_db = _fs.client()
+    except Exception as e:
+        print(f"[firestore] Init failed: {e}")
+        raise
+    return _firestore_db
+
+
+def fetch_firestore_events(
+    days_ahead: int = 30,
+    category: Optional[str] = None,
+    limit: int = 80,
+) -> List[Dict]:
+    """Fetch scraped events from Firestore `events` collection."""
+    from datetime import date, timedelta
+    try:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        db = _get_firestore_db()
+    except Exception as e:
+        print(f"[firestore] fetch_firestore_events skipped: {e}")
+        return []
+
+    today = date.today().isoformat()
+    max_date = (date.today() + timedelta(days=days_ahead)).isoformat()
+
+    try:
+        docs = (
+            db.collection("events")
+            .where(filter=FieldFilter("is_active", "==", True))
+            .where(filter=FieldFilter("end_date", ">=", today))
+            .limit(limit)
+            .stream()
+        )
+    except Exception as e:
+        print(f"[firestore] query failed: {e}")
+        return []
+
+    events = []
+    for doc in docs:
+        try:
+            data = doc.to_dict()
+            start = data.get("start_date") or ""
+            # Isključi evente koji počinju previše daleko u budućnosti
+            if start and start > max_date:
+                continue
+
+            ev = {
+                "title": data.get("title", ""),
+                "description": data.get("description") or data.get("short_description", ""),
+                "short_description": data.get("short_description", ""),
+                "start_date": start or None,
+                "end_date": data.get("end_date"),
+                "date_text": data.get("date_text", ""),
+                "location": data.get("location", ""),
+                "url": data.get("source_url", ""),
+                "image_url": data.get("image_url"),
+                "source": data.get("source", "scraped"),
+                "category": data.get("category", "ostalo"),
+                "tags": [],
+                "has_reliable_date": bool(start),
+            }
+
+            if category:
+                if category.lower() not in (ev.get("category") or "").lower():
+                    continue
+
+            events.append(ev)
+        except Exception:
+            continue
+
+    print(f"[firestore] fetched {len(events)} events (days_ahead={days_ahead})")
+    return events
+
 # Tavily client (optional)
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 tavily_client = None
@@ -366,7 +454,13 @@ def get_hybrid_upcoming_events(
         print(f"[hybrid events] scraper error: {e}")
         scraped = []
 
-    merged = _merge_events(curated, scraped, max_total=limit * 2)
+    try:
+        firestore_ev = fetch_firestore_events(days_ahead=days_ahead, category=category)
+    except Exception as e:
+        print(f"[hybrid events] Firestore fetch error: {e}")
+        firestore_ev = []
+
+    merged = _merge_events(curated, scraped + firestore_ev, max_total=limit * 2)
 
     if category:
         cl = category.lower().strip()

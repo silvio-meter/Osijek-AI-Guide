@@ -24,3 +24,4 @@ pytest-asyncio
 httpx
 slowapi
 tavily-python
+firebase-admin>=6.5.0
