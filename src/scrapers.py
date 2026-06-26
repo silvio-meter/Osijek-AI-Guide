@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import re
 import time
+import concurrent.futures
 
 NAJAVE_URL = "http://www.osijek031.com/osijek-najave-kino-kazaliste-koncerti.php"
 
@@ -60,7 +61,7 @@ def fetch_osijek031_najave(days_ahead: int = 14, use_cache: bool = True, debug: 
     }
 
     try:
-        resp = requests.get(NAJAVE_URL, headers=headers, timeout=12)
+        resp = requests.get(NAJAVE_URL, headers=headers, timeout=8)
         resp.encoding = "windows-1250"
         html = resp.text
     except Exception as e:
@@ -322,36 +323,35 @@ def fetch_local_osijek_events(days_ahead: int = 14, use_cache: bool = True) -> L
     """
     Main function for Lega.
     Combines events from all supported local sources with improved deduplication.
+    Scrapers run in parallel (ThreadPoolExecutor) with a 9s overall wall-clock cap
+    so a single slow/hanging source can't block the public /events endpoint.
     """
-    all_events = []
+    _scrapers = [
+        ("osijek031",        lambda: fetch_osijek031_najave(days_ahead=days_ahead, use_cache=use_cache)),
+        ("osijeknews",       lambda: fetch_osijeknews_events(days_ahead=days_ahead, use_cache=use_cache)),
+        ("sib",              lambda: fetch_sib_events(days_ahead=days_ahead, use_cache=use_cache)),
+        ("djecje-kazaliste", lambda: fetch_djecje_kazaliste_program(days_ahead=days_ahead, use_cache=use_cache)),
+    ]
 
-    # osijek031.com (community)
-    try:
-        events = fetch_osijek031_najave(days_ahead=days_ahead, use_cache=use_cache)
-        all_events.extend(events)
-    except Exception as e:
-        print(f"[scraper] osijek031 error: {e}")
+    all_events: List[Dict] = []
 
-    # osijeknews.hr (news + najave)
-    try:
-        events = fetch_osijeknews_events(days_ahead=days_ahead, use_cache=use_cache)
-        all_events.extend(events)
-    except Exception as e:
-        print(f"[scraper] osijeknews error: {e}")
-
-    # sib.net.hr
-    try:
-        events = fetch_sib_events(days_ahead=days_ahead, use_cache=use_cache)
-        all_events.extend(events)
-    except Exception as e:
-        print(f"[scraper] sib.net.hr error: {e}")
-
-    # Dječje kazalište Branka Mihaljevića – tjedni raspored (specific venue program)
-    try:
-        events = fetch_djecje_kazaliste_program(days_ahead=days_ahead, use_cache=use_cache)
-        all_events.extend(events)
-    except Exception as e:
-        print(f"[scraper] djecje-kazaliste error: {e}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_name = {executor.submit(fn): name for name, fn in _scrapers}
+        try:
+            for future in concurrent.futures.as_completed(future_to_name, timeout=9):
+                name = future_to_name[future]
+                try:
+                    all_events.extend(future.result())
+                except Exception as e:
+                    print(f"[scraper] {name} error: {e}")
+        except concurrent.futures.TimeoutError:
+            print("[scraper] 9s wall-clock cap hit — collecting results from completed scrapers")
+            for future, name in future_to_name.items():
+                if future.done():
+                    try:
+                        all_events.extend(future.result())
+                    except Exception as e:
+                        print(f"[scraper] {name} (late) error: {e}")
 
     # Filtriraj šum (CineStar, Kino Urania dnevni programi itd.)
     all_events = [e for e in all_events if not _is_noise_event(e)]
@@ -411,7 +411,7 @@ def fetch_osijeknews_events(days_ahead: int = 14, use_cache: bool = True) -> Lis
     }
 
     try:
-        resp = requests.get(url, headers=headers, timeout=12)
+        resp = requests.get(url, headers=headers, timeout=8)
         soup = BeautifulSoup(resp.text, "lxml")
     except Exception as e:
         print(f"[scraper] osijeknews.hr fetch error: {e}")
@@ -535,7 +535,7 @@ def fetch_sib_events(days_ahead: int = 14, use_cache: bool = True) -> List[Dict]
     }
 
     try:
-        resp = requests.get(url, headers=headers, timeout=12)
+        resp = requests.get(url, headers=headers, timeout=8)
         soup = BeautifulSoup(resp.text, "lxml")
     except Exception as e:
         print(f"[scraper] sib.net.hr fetch error: {e}")
@@ -636,7 +636,7 @@ def fetch_djecje_kazaliste_program(days_ahead: int = 14, use_cache: bool = True)
     soup = None
     for u in urls_to_try:
         try:
-            resp = requests.get(u, headers=headers, timeout=12)
+            resp = requests.get(u, headers=headers, timeout=8)
             text = resp.text.lower()
             if "verification" in text or "please wait" in text or "loader" in text or len(resp.text) < 4000:
                 print(f"[scraper] djecje hit verification on {u}, trying next...")
