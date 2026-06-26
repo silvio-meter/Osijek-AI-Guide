@@ -395,8 +395,16 @@ def fetch_local_osijek_events(days_ahead: int = 14, use_cache: bool = True) -> L
 
 def fetch_osijeknews_events(days_ahead: int = 14, use_cache: bool = True) -> List[Dict]:
     """
-    Improved scraper for osijeknews.hr "NAJAVE DOGAĐANJA" section.
-    More robust day-header parsing + better event extraction.
+    Scraper for osijeknews.hr "NAJAVE DOGAĐANJA" section.
+
+    Key invariants:
+    - Finds the heading by tag type (h2/h3/h4 in <body>), NOT by string search.
+      The old string search matched the JSON-LD <script> meta description first,
+      causing find_all_next() to sweep the entire page body.
+    - Stops collecting when the next unrelated section heading is encountered.
+    - Requires an explicit future date on each item — events without a parseable
+      weekday+date header are discarded (not assigned today's date).
+    - Rejects non-event content (news articles, police reports, ads, etc.).
     """
     cache_key = f"osijeknews_events_{days_ahead}"
 
@@ -406,110 +414,141 @@ def fetch_osijeknews_events(days_ahead: int = 14, use_cache: bool = True) -> Lis
             return cached
 
     url = "https://osijeknews.hr/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; OsijekAI-Guide/1.0)"
-    }
+    req_headers = {"User-Agent": "Mozilla/5.0 (compatible; OsijekAI-Guide/1.0)"}
 
     try:
-        resp = requests.get(url, headers=headers, timeout=8)
+        resp = requests.get(url, headers=req_headers, timeout=8)
         soup = BeautifulSoup(resp.text, "lxml")
     except Exception as e:
         print(f"[scraper] osijeknews.hr fetch error: {e}")
         return []
 
-    events = []
-    today = datetime.now().date()
-
-    # Find the "NAJAVE DOGAĐANJA" heading
-    najave_heading = soup.find(string=lambda t: t and "NAJAVE DOGAĐANJA" in str(t).upper())
-    if not najave_heading:
+    body = soup.body
+    if not body:
         return []
 
-    # Get the container that holds the najave list (usually the next sibling or parent)
-    container = najave_heading.parent
-    for _ in range(5):  # climb up a bit to find the right container
-        if container and container.find(string=re.compile(r"(ponedjeljak|utorak|srijeda|četvrtak|petak|subota|nedjelja)", re.I)):
+    # Find the NAJAVE DOGAĐANJA heading in the visible body (h2/h3/h4 only).
+    # Explicitly exclude <script> and <head> to avoid matching the JSON-LD meta.
+    najave_heading = None
+    for tag in body.find_all(["h2", "h3", "h4"]):
+        if "NAJAVE" in tag.get_text(strip=True).upper():
+            najave_heading = tag
             break
-        if container:
-            container = container.parent
 
-    if not container:
-        container = najave_heading.parent.parent
+    if not najave_heading:
+        print("[scraper] osijeknews.hr: NAJAVE DOGAĐANJA heading not found in body — returning empty")
+        return []
 
-    # Find all day headers inside the container
-    day_pattern = re.compile(r"(ponedjeljak|utorak|srijeda|četvrtak|petak|subota|nedjelja)[,\s]+(\d{1,2})\.(\d{1,2})\.(\d{4})", re.I)
+    today = datetime.now().date()
+    day_pattern = re.compile(
+        r"(ponedjeljak|utorak|srijeda|četvrtak|petak|subota|nedjelja)"
+        r"[,\s]+(\d{1,2})\.(\d{1,2})\.(\d{4})",
+        re.I,
+    )
 
+    BAD_TITLES = {
+        "afere", "politika", "gospodarstvo", "sport", "kultura",
+        "kazalište i kino", "koncerti", "galerije", "najave", "vijesti", "osijek",
+    }
+
+    # Reject patterns for obvious non-event content.
+    # These strings signal news articles, accidents, press releases, or ads —
+    # none of which belong in an events feed.
+    NEWS_NOISE = re.compile(
+        r"nesreća|nesrecci|stradao|poginuo|poginula|uhićen|uhapšen|optužen|"
+        r"osuđen|policij|požar|prometna|smrtno|preminuo|preminula|"
+        r"influenc|natječ|sufinancir|konferencija za novinare|"
+        r"priopćenj|izvješć",
+        re.I,
+    )
+
+    events: List[Dict] = []
     current_date = None
-
-    # Known non-event category/navigation titles that pollute the section
-    BAD_TITLES = {"afere", "politika", "gospodarstvo", "sport", "kultura", "kazalište i kino", "koncerti", "galerije", "najave", "vijesti", "osijek"}
-
-    # Walk through relevant elements after the heading (more defensive)
     collected = 0
-    for elem in container.find_all_next():
-        if collected > 35:
+
+    for elem in najave_heading.find_all_next():
+        if collected >= 25:
             break
+
+        # Stop when we reach the next section-level heading that is NOT a date header.
+        if elem.name in ("h2", "h3") and elem is not najave_heading:
+            text_upper = elem.get_text(strip=True).upper()
+            is_date_header = any(
+                day in text_upper
+                for day in ["PONEDJELJAK", "UTORAK", "SRIJEDA", "ČETVRTAK", "PETAK", "SUBOTA", "NEDJELJA"]
+            )
+            if not is_date_header:
+                break
+
         text = elem.get_text(" ", strip=True)
 
-        # Check for day header
+        # Detect weekday + date headers ("Petak, 27.06.2026.")
         day_match = day_pattern.search(text)
         if day_match:
             try:
-                d, m, y = int(day_match.group(2)), int(day_match.group(3)), int(day_match.group(4))
+                d = int(day_match.group(2))
+                m = int(day_match.group(3))
+                y = int(day_match.group(4))
                 current_date = datetime(y, m, d).date()
-            except:
+            except Exception:
                 current_date = None
             continue
 
-        # Look for event links — much stricter
-        if elem.name == "a" and elem.get("href"):
-            href = elem.get("href")
-            title = elem.get_text(strip=True).strip()
+        # Only process <a> links
+        if elem.name != "a" or not elem.get("href"):
+            continue
 
-            if not title or len(title) < 12:
-                continue
-            if title.lower() in BAD_TITLES:
-                continue
-            if "osijeknews.hr" not in href and not href.startswith("/"):
-                continue
+        href = elem["href"]
+        title = elem.get_text(strip=True)
 
-            # Skip obvious category / navigation / tag links
-            if any(x in href for x in ["/kategorija/", "/tag/", "#", "/page/"]):
-                continue
-            if any(bad in title.lower() for bad in BAD_TITLES):
-                continue
+        # Basic quality gates
+        if not title or len(title) < 12:
+            continue
+        if title.lower() in BAD_TITLES:
+            continue
+        if "osijeknews.hr" not in href and not href.startswith("/"):
+            continue
+        if any(seg in href for seg in ["/kategorija/", "/tag/", "#", "/page/"]):
+            continue
+        if any(bad in title.lower() for bad in BAD_TITLES):
+            continue
 
-            # Only accept reasonably plausible event-like titles (avoid pure nav)
-            if len(title) < 18 and not any(c.isdigit() for c in title):
-                continue
+        # Reject items without an explicitly parsed future date.
+        # This is the key change: we never fall back to "today" as a default.
+        if current_date is None:
+            continue
+        if current_date < today:
+            continue
+        if (current_date - today).days > days_ahead:
+            continue
 
-            event_date = current_date
-            if event_date and (event_date < today or (event_date - today).days > days_ahead):
-                continue
+        # Reject obvious non-event content (accidents, press releases, ads …)
+        if NEWS_NOISE.search(title):
+            continue
 
-            events.append({
-                "title": title[:160],
-                "url": href if href.startswith("http") else "https://osijeknews.hr" + href,
-                "date": event_date.isoformat() if event_date else None,
-                "source": "osijeknews.hr",
-                "has_reliable_date": event_date is not None,
-                "location": "Osijek",
-                "short_description": title[:90],
-            })
-            collected += 1
+        events.append({
+            "title": title[:160],
+            "url": href if href.startswith("http") else "https://osijeknews.hr" + href,
+            "date": current_date.isoformat(),
+            "source": "osijeknews.hr",
+            "has_reliable_date": True,
+            "location": "Osijek",
+            "short_description": title[:90],
+        })
+        collected += 1
 
-    # Deduplicate
-    seen = set()
-    unique = []
+    # Deduplicate by (normalised title, url)
+    seen: set = set()
+    unique: List[Dict] = []
     for e in events:
         key = (e["title"][:80], e["url"])
         if key not in seen:
             seen.add(key)
             unique.append(e)
 
-    unique.sort(key=lambda x: (0 if x["has_reliable_date"] else 1, x.get("date") or "9999-12-31"))
+    unique.sort(key=lambda x: x.get("date", "9999-12-31"))
 
-    result = unique[:50]
+    result = unique[:30]
 
     if use_cache:
         _set_cache(cache_key, result)
